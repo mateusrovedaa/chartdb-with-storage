@@ -49,7 +49,15 @@ export const useDiagramLoader = () => {
                     const liveDiagram = await fetchLiveDiagram(schemaId);
                     await deleteDiagram(liveDiagram.id);
                     await addDiagram({ diagram: liveDiagram });
-                    setInitialDiagram(liveDiagram);
+                    // loadDiagram popula o contexto do ChartDB (tabelas,
+                    // relacoes, etc.); sem isso o editor abre vazio.
+                    const loaded = await loadDiagram(liveDiagram.id);
+                    if (!loaded) {
+                        hideLoader();
+                        navigate('/live');
+                        return;
+                    }
+                    setInitialDiagram(loaded);
                     hideLoader();
                 } catch {
                     hideLoader();
