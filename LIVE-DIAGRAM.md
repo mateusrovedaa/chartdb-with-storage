@@ -35,10 +35,11 @@ Como obter o JSON:
                                 │
         ┌───────────────────────┴──────────────────────┐
    rota /live                                  rota /live/:schemaId
-   lista os schemas de                          fetch /schema-data/{id}.json,
-   /schema-data/index.json                      diagramFromJSONInput(json),
-   e linka pra /live/:schemaId                  grava no IndexedDB com id fixo
-                                                "live-{id}", navega pro diagrama
+   lista os schemas de                          renderiza o EditorPage NA PROPRIA URL:
+   /schema-data/index.json                      fetch /schema-data/{id}.json,
+   e linka pra /live/:schemaId                  diagramFromJSONInput(json), grava no
+                                                IndexedDB com id fixo "live-{id}" e
+                                                abre o editor (URL continua /live/{id})
 ```
 
 Cada navegador importa o diagrama para o **seu próprio IndexedDB local**. O que é
@@ -51,17 +52,18 @@ atualizado"; não é edição colaborativa em tempo real.
 |---|---|
 | `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT`/`DELETE` para o Publish to Live |
 | `Dockerfile` | `NODE_OPTIONS=--max-old-space-size=4096` (vite estoura heap padrão) |
-| `src/router.tsx` | Rotas `live` e `live/:schemaId` (antes do catch-all `*`) |
-| `src/lib/live-schemas.ts` | **novo** — fetch do índice, validação de id, id do diagrama |
+| `src/router.tsx` | Rota `live` (lista) + `live/:schemaId` renderiza o `EditorPage` (sem redirect) |
+| `src/lib/live-schemas.ts` | **novo** — índice, validação de id, e `fetchLiveDiagram` (busca o JSON do volume) |
 | `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
-| `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático via `diagramFromJSONInput` |
+| `src/pages/editor-page/use-diagram-loader.tsx` | lê `:schemaId`, importa do volume e carrega `live-{schemaId}` mantendo a URL |
 | `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (botão) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
 | `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** + chamada do auto-sync |
 | `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 
 Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
-ChartDB: `diagramFromJSONInput`, `diagramToJSONOutput`, `useStorage`, `useChartDB`. Ver a
-seção de atualização.
+ChartDB: `diagramFromJSONInput`, `diagramToJSONOutput`, `useStorage`, `useChartDB`. Além
+disso, `use-diagram-loader.tsx` (arquivo do upstream) foi **modificado** — é o ponto mais
+sensível a rebase; ver a seção de atualização.
 
 ## Publicar direto do app (Publish to Live) — sem export manual
 
@@ -79,11 +81,12 @@ escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
 
 ### Auto-sync ao editar um diagrama live
 
-Um diagrama aberto via `/live/{id}` recebe um id fixo `live-{id}` no IndexedDB — por isso
-o app te leva para `/diagrams/live-{id}` (comportamento esperado, id estável para não
-duplicar). A partir daí, `useAutoPublishLive` **sincroniza as edições de volta pro volume
-automaticamente**: a cada alteração salva, faz o `PUT` do JSON (com debounce de ~1,2s) e
-atualiza o `index.json`. Assim:
+Um diagrama aberto via `/live/{id}` é renderizado **na própria URL `/live/{id}`** (o editor
+roda ali, sem redirect pra `/diagrams/...`), então o link é estável e bookmarkável — dar
+F5 re-importa do volume. Internamente ele usa um id fixo `live-{id}` no IndexedDB. A partir
+daí, `useAutoPublishLive` **sincroniza as edições de volta pro volume automaticamente**: a
+cada alteração salva, faz o `PUT` do JSON (com debounce de ~1,2s) e atualiza o `index.json`.
+Assim:
 
 - Editar e reabrir em outra aba/navegador via `/live/{id}` reflete a última versão.
 - Reabrir `/live/{id}` re-importa do volume — que agora está em dia com suas edições, então

@@ -6,7 +6,7 @@ import type { TemplatesPageLoaderData } from './pages/templates-page/templates-p
 import { getTemplatesAndAllTags } from './templates-data/template-utils';
 
 const routes: RouteObject[] = [
-    ...['', 'diagrams/:diagramId'].map((path) => ({
+    ...['', 'diagrams/:diagramId', 'live/:schemaId'].map((path) => ({
         path,
         async lazy() {
             const { EditorPage } =
@@ -136,16 +136,6 @@ const routes: RouteObject[] = [
                 await import('./pages/live-index-page/live-index-page');
             return {
                 element: <LiveIndexPage />,
-            };
-        },
-    },
-    {
-        path: 'live/:schemaId',
-        async lazy() {
-            const { LiveDiagramPage } =
-                await import('./pages/live-diagram-page/live-diagram-page');
-            return {
-                element: <LiveDiagramPage />,
             };
         },
     },

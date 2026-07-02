@@ -5,19 +5,26 @@ import { useFullScreenLoader } from '@/hooks/use-full-screen-spinner';
 import { useRedoUndoStack } from '@/hooks/use-redo-undo-stack';
 import { useStorage } from '@/hooks/use-storage';
 import type { Diagram } from '@/lib/domain/diagram';
+import { fetchLiveDiagram, liveDiagramId } from '@/lib/live-schemas';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 export const useDiagramLoader = () => {
     const [initialDiagram, setInitialDiagram] = useState<Diagram | undefined>();
-    const { diagramId } = useParams<{ diagramId: string }>();
+    const { diagramId: diagramIdParam, schemaId } = useParams<{
+        diagramId: string;
+        schemaId: string;
+    }>();
+    // Rota /live/:schemaId renderiza o editor direto (sem redirect); o
+    // diagrama correspondente tem id fixo "live-{schemaId}".
+    const diagramId = schemaId ? liveDiagramId(schemaId) : diagramIdParam;
     const { config } = useConfig();
     const { loadDiagram, currentDiagram } = useChartDB();
     const { resetRedoStack, resetUndoStack } = useRedoUndoStack();
     const { showLoader, hideLoader } = useFullScreenLoader();
     const { openCreateDiagramDialog, openOpenDiagramDialog } = useDialog();
     const navigate = useNavigate();
-    const { listDiagrams } = useStorage();
+    const { listDiagrams, addDiagram, deleteDiagram } = useStorage();
 
     const currentDiagramLoadingRef = useRef<string | undefined>(undefined);
 
@@ -31,6 +38,27 @@ export const useDiagramLoader = () => {
         }
 
         const loadDefaultDiagram = async () => {
+            // /live/:schemaId — importa (ou re-importa) o diagrama do volume
+            // antes de carregar, mantendo a URL /live/{schemaId}.
+            if (schemaId) {
+                setInitialDiagram(undefined);
+                showLoader();
+                resetRedoStack();
+                resetUndoStack();
+                try {
+                    const liveDiagram = await fetchLiveDiagram(schemaId);
+                    await deleteDiagram(liveDiagram.id);
+                    await addDiagram({ diagram: liveDiagram });
+                    setInitialDiagram(liveDiagram);
+                    hideLoader();
+                } catch {
+                    hideLoader();
+                    navigate('/live');
+                }
+
+                return;
+            }
+
             if (diagramId) {
                 setInitialDiagram(undefined);
                 showLoader();
@@ -75,10 +103,13 @@ export const useDiagramLoader = () => {
         loadDefaultDiagram();
     }, [
         diagramId,
+        schemaId,
         openCreateDiagramDialog,
         config,
         navigate,
         listDiagrams,
+        addDiagram,
+        deleteDiagram,
         loadDiagram,
         resetRedoStack,
         resetUndoStack,
