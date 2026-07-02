@@ -1,13 +1,8 @@
-From 16a3587c6e62fbb10b6564868e456717df032a32 Mon Sep 17 00:00:00 2001
+From ca5e3bea18f4b33c8fbdf3739e2c3c88184e9f3b Mon Sep 17 00:00:00 2001
 From: Mateus Roveda <mateusroveda04@gmail.com>
-Date: Thu, 2 Jul 2026 14:28:31 -0300
+Date: Thu, 2 Jul 2026 14:35:25 -0300
 Subject: [PATCH] feat: live diagram (/live, /live/:schemaId) + Publish to Live
  + auto-sync
-
-/live/:schemaId renderiza o editor na propria URL (bookmarkavel), importa
-o JSON de export do volume, auto-importa no IndexedDB, publica de volta via
-WebDAV PUT (botao Publish to Live) e sincroniza edicoes automaticamente.
-Multiplos schemas, sem conexao com o banco em runtime.
 
 Base: upstream chartdb/chartdb v1.20.1 (c24936a)
 ---
@@ -20,10 +15,10 @@ Base: upstream chartdb/chartdb v1.20.1 (c24936a)
  src/hooks/use-publish-live.tsx                | 158 +++++++++++++
  src/lib/live-schemas.ts                       |  61 +++++
  .../editor-page/top-navbar/menu/menu.tsx      |   6 +
- src/pages/editor-page/use-diagram-loader.tsx  |  35 ++-
+ src/pages/editor-page/use-diagram-loader.tsx  |  43 +++-
  src/pages/live-index-page/live-index-page.tsx |  68 ++++++
  src/router.tsx                                |  12 +-
- 12 files changed, 666 insertions(+), 3 deletions(-)
+ 12 files changed, 674 insertions(+), 3 deletions(-)
  create mode 100644 LIVE-DIAGRAM.md
  create mode 100644 schema-data-sample/demo.json
  create mode 100644 schema-data-sample/index.json
@@ -673,7 +668,7 @@ index 28c27d6..6155d51 100644
                      <MenubarItem
                          onClick={() =>
 diff --git a/src/pages/editor-page/use-diagram-loader.tsx b/src/pages/editor-page/use-diagram-loader.tsx
-index 4848290..8a07bd0 100644
+index 4848290..1cf2e01 100644
 --- a/src/pages/editor-page/use-diagram-loader.tsx
 +++ b/src/pages/editor-page/use-diagram-loader.tsx
 @@ -5,19 +5,26 @@ import { useFullScreenLoader } from '@/hooks/use-full-screen-spinner';
@@ -705,7 +700,7 @@ index 4848290..8a07bd0 100644
  
      const currentDiagramLoadingRef = useRef<string | undefined>(undefined);
  
-@@ -31,6 +38,27 @@ export const useDiagramLoader = () => {
+@@ -31,6 +38,35 @@ export const useDiagramLoader = () => {
          }
  
          const loadDefaultDiagram = async () => {
@@ -720,7 +715,15 @@ index 4848290..8a07bd0 100644
 +                    const liveDiagram = await fetchLiveDiagram(schemaId);
 +                    await deleteDiagram(liveDiagram.id);
 +                    await addDiagram({ diagram: liveDiagram });
-+                    setInitialDiagram(liveDiagram);
++                    // loadDiagram popula o contexto do ChartDB (tabelas,
++                    // relacoes, etc.); sem isso o editor abre vazio.
++                    const loaded = await loadDiagram(liveDiagram.id);
++                    if (!loaded) {
++                        hideLoader();
++                        navigate('/live');
++                        return;
++                    }
++                    setInitialDiagram(loaded);
 +                    hideLoader();
 +                } catch {
 +                    hideLoader();
@@ -733,7 +736,7 @@ index 4848290..8a07bd0 100644
              if (diagramId) {
                  setInitialDiagram(undefined);
                  showLoader();
-@@ -75,10 +103,13 @@ export const useDiagramLoader = () => {
+@@ -75,10 +111,13 @@ export const useDiagramLoader = () => {
          loadDefaultDiagram();
      }, [
          diagramId,
