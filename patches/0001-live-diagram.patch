@@ -1,28 +1,30 @@
-From e88468cb2758a8125404a041843e96c1dae1790c Mon Sep 17 00:00:00 2001
+From d59d356a5a03569d17d673e6861201305a36e970 Mon Sep 17 00:00:00 2001
 From: Mateus Roveda <mateusroveda04@gmail.com>
-Date: Thu, 2 Jul 2026 13:58:26 -0300
+Date: Thu, 2 Jul 2026 14:09:49 -0300
 Subject: [PATCH] feat: live diagram (/live, /live/:schemaId) + Publish to Live
+ + auto-sync
 
 Serve JSONs de export de diagrama via Nginx a partir de um volume montado,
-auto-importa no IndexedDB ao abrir a pagina, e publica o diagrama atual de
-volta no volume via WebDAV PUT (botao Publish to Live). Multiplos schemas,
-sem conexao com o banco em runtime.
+auto-importa no IndexedDB ao abrir a pagina, publica o diagrama atual de
+volta no volume via WebDAV PUT (botao Publish to Live) e sincroniza edicoes
+de diagramas live automaticamente. Multiplos schemas, sem conexao com o
+banco em runtime.
 
 Base: upstream chartdb/chartdb v1.20.1 (c24936a)
 ---
  Dockerfile                                    |   2 +
- LIVE-DIAGRAM.md                               | 197 ++++++++++++++++++
+ LIVE-DIAGRAM.md                               | 214 ++++++++++++++++++
  default.conf.template                         |  16 ++
  entrypoint.sh                                 |   5 +
- schema-data-sample/demo.json                  |  86 ++++++++
+ schema-data-sample/demo.json                  |  86 +++++++
  schema-data-sample/index.json                 |   3 +
- src/hooks/use-publish-live.tsx                |  93 +++++++++
+ src/hooks/use-publish-live.tsx                | 158 +++++++++++++
  src/lib/live-schemas.ts                       |  28 +++
- .../editor-page/top-navbar/menu/menu.tsx      |   5 +
+ .../editor-page/top-navbar/menu/menu.tsx      |   6 +
  .../live-diagram-page/live-diagram-page.tsx   | 101 +++++++++
  src/pages/live-index-page/live-index-page.tsx |  68 ++++++
  src/router.tsx                                |  20 ++
- 12 files changed, 624 insertions(+)
+ 12 files changed, 707 insertions(+)
  create mode 100644 LIVE-DIAGRAM.md
  create mode 100644 schema-data-sample/demo.json
  create mode 100644 schema-data-sample/index.json
@@ -46,10 +48,10 @@ index 1085241..8e3eb72 100644
  FROM nginx:stable-alpine AS production
 diff --git a/LIVE-DIAGRAM.md b/LIVE-DIAGRAM.md
 new file mode 100644
-index 0000000..9a9ccbf
+index 0000000..75370dd
 --- /dev/null
 +++ b/LIVE-DIAGRAM.md
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,214 @@
 +# Live Diagram — fork do ChartDB self-hosted
 +
 +Este fork adiciona ao ChartDB self-hosted a funcionalidade **Live Diagram**: uma URL
@@ -107,8 +109,8 @@ index 0000000..9a9ccbf
 +| `src/lib/live-schemas.ts` | **novo** — fetch do índice, validação de id, id do diagrama |
 +| `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
 +| `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático via `diagramFromJSONInput` |
-+| `src/hooks/use-publish-live.tsx` | **novo** — publica o diagrama atual no volume via `PUT` |
-+| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** no menu Export as |
++| `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (botão) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
++| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** + chamada do auto-sync |
 +| `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 +
 +Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
@@ -129,13 +131,30 @@ index 0000000..9a9ccbf
 +Fluxo final: cria/edita o diagrama → **Publish to Live** → `/live/{id}` já reflete. A
 +escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
 +
++### Auto-sync ao editar um diagrama live
++
++Um diagrama aberto via `/live/{id}` recebe um id fixo `live-{id}` no IndexedDB — por isso
++o app te leva para `/diagrams/live-{id}` (comportamento esperado, id estável para não
++duplicar). A partir daí, `useAutoPublishLive` **sincroniza as edições de volta pro volume
++automaticamente**: a cada alteração salva, faz o `PUT` do JSON (com debounce de ~1,2s) e
++atualiza o `index.json`. Assim:
++
++- Editar e reabrir em outra aba/navegador via `/live/{id}` reflete a última versão.
++- Reabrir `/live/{id}` re-importa do volume — que agora está em dia com suas edições, então
++  nada se perde.
++
++O auto-sync vale **apenas** para diagramas abertos via `/live` (id `live-*`); diagramas
++locais comuns não são enviados a lugar nenhum. Janela conhecida: se você editar e fechar a
++aba em menos de ~1,2s, aquele último lote pode não ter sido publicado ainda.
++
 +**Pré-requisitos e segurança:**
 +- O volume precisa estar montado como **leitura-escrita** (sem `:ro`), senão o `PUT` falha.
 +- O endpoint `PUT`/`DELETE` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
 +  **proxy reverso à frente** da instância. Sem esse proxy, qualquer um na rede pode
 +  sobrescrever/apagar schemas.
-+- Continua não sendo colaboração em tempo real: quem abre `/live` importa pro próprio
-+  IndexedDB. O Publish centraliza a *fonte*, não a sessão de edição.
++- Não é edição colaborativa em tempo real: cada navegador tem seu IndexedDB. O que se
++  centraliza é a *fonte* (o JSON no volume); dois editores simultâneos sobrescrevem um ao
++  outro (último a salvar vence).
 +
 +## Como testar
 +
@@ -392,16 +411,19 @@ index 0000000..acc82a8
 +]
 diff --git a/src/hooks/use-publish-live.tsx b/src/hooks/use-publish-live.tsx
 new file mode 100644
-index 0000000..728e5dd
+index 0000000..7594374
 --- /dev/null
 +++ b/src/hooks/use-publish-live.tsx
-@@ -0,0 +1,93 @@
-+import { useCallback, useState } from 'react';
+@@ -0,0 +1,158 @@
++import { useCallback, useEffect, useRef, useState } from 'react';
 +import { useChartDB } from '@/hooks/use-chartdb';
 +import { useToast } from '@/components/toast/use-toast';
 +import { diagramToJSONOutput } from '@/lib/export-import-utils';
++import type { Diagram } from '@/lib/domain/diagram';
 +import type { LiveSchemaIndexEntry } from '@/lib/live-schemas';
 +import { isValidLiveSchemaId } from '@/lib/live-schemas';
++
++const LIVE_PREFIX = 'live-';
 +
 +const slugify = (name: string): string =>
 +    name
@@ -410,6 +432,64 @@ index 0000000..728e5dd
 +        .replace(/[^a-z0-9-_]+/g, '-')
 +        .replace(/^-+|-+$/g, '') || 'diagram';
 +
++// Diagramas abertos via /live tem id "live-{schemaId}"; para os demais,
++// deriva o schemaId do nome (usado ao publicar um diagrama novo).
++const liveSchemaIdOf = (diagram: Diagram): string =>
++    diagram.id.startsWith(LIVE_PREFIX)
++        ? diagram.id.slice(LIVE_PREFIX.length)
++        : slugify(diagram.name);
++
++// Grava o diagrama no volume (PUT do JSON) e faz upsert no index.json.
++const putDiagramToLive = async (
++    schemaId: string,
++    diagram: Diagram
++): Promise<void> => {
++    if (!isValidLiveSchemaId(schemaId)) {
++        throw new Error(`Invalid schema id: "${schemaId}"`);
++    }
++
++    const putRes = await fetch(`/schema-data/${schemaId}.json`, {
++        method: 'PUT',
++        headers: { 'Content-Type': 'application/json' },
++        body: diagramToJSONOutput(diagram),
++    });
++    if (!putRes.ok) {
++        throw new Error(`PUT ${schemaId}.json failed (${putRes.status})`);
++    }
++
++    let index: LiveSchemaIndexEntry[] = [];
++    try {
++        const idxRes = await fetch('/schema-data/index.json', {
++            cache: 'no-store',
++        });
++        if (idxRes.ok) {
++            const parsed = await idxRes.json();
++            if (Array.isArray(parsed)) {
++                index = parsed as LiveSchemaIndexEntry[];
++            }
++        }
++    } catch {
++        // index.json ainda nao existe: comeca vazio
++    }
++
++    const entry: LiveSchemaIndexEntry = {
++        id: schemaId,
++        name: diagram.name,
++        updatedAt: new Date().toISOString(),
++    };
++    const nextIndex = [...index.filter((e) => e.id !== schemaId), entry];
++
++    const idxPut = await fetch('/schema-data/index.json', {
++        method: 'PUT',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify(nextIndex, null, 2),
++    });
++    if (!idxPut.ok) {
++        throw new Error(`PUT index.json failed (${idxPut.status})`);
++    }
++};
++
++// Botao manual "Publish to Live": publica o diagrama atual sob demanda.
 +export const usePublishLive = (): {
 +    publishLive: () => Promise<void>;
 +    isPublishing: boolean;
@@ -421,57 +501,8 @@ index 0000000..728e5dd
 +    const publishLive = useCallback(async () => {
 +        setIsPublishing(true);
 +        try {
-+            const schemaId = slugify(currentDiagram.name);
-+            if (!isValidLiveSchemaId(schemaId)) {
-+                throw new Error(`Invalid schema id from name: "${schemaId}"`);
-+            }
-+
-+            const putRes = await fetch(`/schema-data/${schemaId}.json`, {
-+                method: 'PUT',
-+                headers: { 'Content-Type': 'application/json' },
-+                body: diagramToJSONOutput(currentDiagram),
-+            });
-+            if (!putRes.ok) {
-+                throw new Error(
-+                    `PUT ${schemaId}.json failed (${putRes.status})`
-+                );
-+            }
-+
-+            // Le o index atual (pode nao existir ainda), faz upsert e regrava.
-+            let index: LiveSchemaIndexEntry[] = [];
-+            try {
-+                const idxRes = await fetch('/schema-data/index.json', {
-+                    cache: 'no-store',
-+                });
-+                if (idxRes.ok) {
-+                    const parsed = await idxRes.json();
-+                    if (Array.isArray(parsed)) {
-+                        index = parsed as LiveSchemaIndexEntry[];
-+                    }
-+                }
-+            } catch {
-+                // index.json ainda nao existe: comeca vazio
-+            }
-+
-+            const entry: LiveSchemaIndexEntry = {
-+                id: schemaId,
-+                name: currentDiagram.name,
-+                updatedAt: new Date().toISOString(),
-+            };
-+            const nextIndex = [
-+                ...index.filter((e) => e.id !== schemaId),
-+                entry,
-+            ];
-+
-+            const idxPut = await fetch('/schema-data/index.json', {
-+                method: 'PUT',
-+                headers: { 'Content-Type': 'application/json' },
-+                body: JSON.stringify(nextIndex, null, 2),
-+            });
-+            if (!idxPut.ok) {
-+                throw new Error(`PUT index.json failed (${idxPut.status})`);
-+            }
-+
++            const schemaId = liveSchemaIdOf(currentDiagram);
++            await putDiagramToLive(schemaId, currentDiagram);
 +            toast({
 +                title: 'Published to Live',
 +                description: `Available at /live/${schemaId}`,
@@ -488,6 +519,59 @@ index 0000000..728e5dd
 +    }, [currentDiagram, toast]);
 +
 +    return { publishLive, isPublishing };
++};
++
++// Sincroniza automaticamente diagramas abertos via /live (id "live-*"):
++// a cada edicao, regrava o JSON no volume (debounce), mantendo a fonte
++// centralizada em dia. Diagramas locais normais nao sao afetados.
++const AUTO_PUBLISH_DEBOUNCE_MS = 1200;
++
++export const useAutoPublishLive = (): void => {
++    const { currentDiagram } = useChartDB();
++    const { toast } = useToast();
++    const baselineRef = useRef<string | null>(null);
++    const idRef = useRef<string | null>(null);
++
++    useEffect(() => {
++        const id = currentDiagram?.id;
++        if (!id || !id.startsWith(LIVE_PREFIX)) {
++            idRef.current = null;
++            baselineRef.current = null;
++            return;
++        }
++
++        const json = diagramToJSONOutput(currentDiagram);
++
++        // Primeiro load deste diagrama live: estabelece baseline sem publicar
++        // (evita reescrever o volume logo apos a importacao inicial).
++        if (idRef.current !== id) {
++            idRef.current = id;
++            baselineRef.current = json;
++            return;
++        }
++
++        if (json === baselineRef.current) {
++            return;
++        }
++
++        const handle = setTimeout(async () => {
++            try {
++                await putDiagramToLive(
++                    id.slice(LIVE_PREFIX.length),
++                    currentDiagram
++                );
++                baselineRef.current = json;
++            } catch (e) {
++                toast({
++                    title: 'Auto-publish to Live failed',
++                    description: e instanceof Error ? e.message : String(e),
++                    variant: 'destructive',
++                });
++            }
++        }, AUTO_PUBLISH_DEBOUNCE_MS);
++
++        return () => clearTimeout(handle);
++    }, [currentDiagram, toast]);
 +};
 diff --git a/src/lib/live-schemas.ts b/src/lib/live-schemas.ts
 new file mode 100644
@@ -524,26 +608,27 @@ index 0000000..1a04ded
 +    return entries.filter((entry) => isValidLiveSchemaId(entry.id));
 +};
 diff --git a/src/pages/editor-page/top-navbar/menu/menu.tsx b/src/pages/editor-page/top-navbar/menu/menu.tsx
-index 28c27d6..33871df 100644
+index 28c27d6..6155d51 100644
 --- a/src/pages/editor-page/top-navbar/menu/menu.tsx
 +++ b/src/pages/editor-page/top-navbar/menu/menu.tsx
 @@ -13,6 +13,7 @@ import {
      MenubarTrigger,
  } from '@/components/menubar/menubar';
  import { useChartDB } from '@/hooks/use-chartdb';
-+import { usePublishLive } from '@/hooks/use-publish-live';
++import { useAutoPublishLive, usePublishLive } from '@/hooks/use-publish-live';
  import { useDialog } from '@/hooks/use-dialog';
  import { useExportImage } from '@/hooks/use-export-image';
  import { databaseTypeToLabelMap } from '@/lib/databases';
-@@ -63,6 +64,7 @@ export const Menu: React.FC<MenuProps> = () => {
+@@ -63,6 +64,8 @@ export const Menu: React.FC<MenuProps> = () => {
          setShowDBViews,
      } = useLocalConfig();
      const { t } = useTranslation();
 +    const { publishLive, isPublishing } = usePublishLive();
++    useAutoPublishLive();
      const { redo, undo, hasRedo, hasUndo } = useHistory();
      const { exportImage } = useExportImage();
      const navigate = useNavigate();
-@@ -307,6 +309,9 @@ export const Menu: React.FC<MenuProps> = () => {
+@@ -307,6 +310,9 @@ export const Menu: React.FC<MenuProps> = () => {
                              </MenubarItem>
                          </MenubarSubContent>
                      </MenubarSub>
