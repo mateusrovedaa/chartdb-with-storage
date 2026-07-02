@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useChartDB } from '@/hooks/use-chartdb';
 import { useToast } from '@/components/toast/use-toast';
 import { diagramToJSONOutput } from '@/lib/export-import-utils';
@@ -79,6 +80,7 @@ export const usePublishLive = (): {
 } => {
     const { currentDiagram } = useChartDB();
     const { toast } = useToast();
+    const navigate = useNavigate();
     const [isPublishing, setIsPublishing] = useState<boolean>(false);
 
     const publishLive = useCallback(async () => {
@@ -88,8 +90,9 @@ export const usePublishLive = (): {
             await putDiagramToLive(schemaId, currentDiagram);
             toast({
                 title: 'Published to Live',
-                description: `Available at /live/${schemaId}`,
+                description: `Opening /live/${schemaId}`,
             });
+            navigate(`/live/${schemaId}`);
         } catch (e) {
             toast({
                 title: 'Publish to Live failed',
@@ -99,7 +102,7 @@ export const usePublishLive = (): {
         } finally {
             setIsPublishing(false);
         }
-    }, [currentDiagram, toast]);
+    }, [currentDiagram, toast, navigate]);
 
     return { publishLive, isPublishing };
 };

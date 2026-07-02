@@ -6,6 +6,7 @@ import { DiagramName } from './diagram-name';
 import { LastSaved } from './last-saved';
 import { LanguageNav } from './language-nav/language-nav';
 import { Menu } from './menu/menu';
+import { PublishLiveButton } from './publish-live-button';
 
 export interface TopNavbarProps {}
 
@@ -48,6 +49,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = () => {
             <DiagramName />
             <div className="hidden flex-1 items-center justify-end gap-2 sm:flex">
                 <LastSaved />
+                <PublishLiveButton />
                 {renderStars()}
                 <LanguageNav />
             </div>

@@ -56,8 +56,10 @@ atualizado"; não é edição colaborativa em tempo real.
 | `src/lib/live-schemas.ts` | **novo** — índice, validação de id, e `fetchLiveDiagram` (busca o JSON do volume) |
 | `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
 | `src/pages/editor-page/use-diagram-loader.tsx` | lê `:schemaId`, importa do volume e carrega `live-{schemaId}` mantendo a URL |
-| `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (botão) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
-| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** + chamada do auto-sync |
+| `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (publica + redireciona) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
+| `src/pages/editor-page/top-navbar/publish-live-button.tsx` | **novo** — botão Publish to Live da barra de topo |
+| `src/pages/editor-page/top-navbar/top-navbar.tsx` | inclui o botão perto do "last saved" |
+| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** no Export as + chamada do auto-sync |
 | `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 
 Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
@@ -67,16 +69,17 @@ sensível a rebase; ver a seção de atualização.
 
 ## Publicar direto do app (Publish to Live) — sem export manual
 
-Para não precisar exportar o JSON e jogar no volume à mão, o menu **Export as** ganhou o
-item **Publish to Live**. Ao clicar, o app:
+Para não precisar exportar o JSON e jogar no volume à mão, há um botão **Publish to Live**
+na barra de topo (ao lado do "last saved") e também no menu **Actions → Export as**. Ao
+clicar, o app:
 
 1. Serializa o diagrama atual (`diagramToJSONOutput`).
-2. Faz `PUT /schema-data/{id}.json` no volume (id = slug do nome do diagrama, validado
-   contra `^[a-z0-9-_]+$`).
+2. Faz `PUT /schema-data/{id}.json` no volume (id = do diagrama live atual, ou slug do
+   nome para um diagrama novo, validado contra `^[a-z0-9-_]+$`).
 3. Lê o `index.json`, faz upsert da entrada `{ id, name, updatedAt }` e regrava via `PUT`.
-4. Mostra um toast com o link `/live/{id}`.
+4. Redireciona para `/live/{id}`, abrindo o diagrama já como live.
 
-Fluxo final: cria/edita o diagrama → **Publish to Live** → `/live/{id}` já reflete. A
+Fluxo final: cria/edita o diagrama → **Publish to Live** → cai direto em `/live/{id}`. A
 escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
 
 ### Auto-sync ao editar um diagrama live
