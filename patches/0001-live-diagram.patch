@@ -1,27 +1,28 @@
-From 0205ab3cbd8ad08bc8061876aaa4a48461862e65 Mon Sep 17 00:00:00 2001
+From e88468cb2758a8125404a041843e96c1dae1790c Mon Sep 17 00:00:00 2001
 From: Mateus Roveda <mateusroveda04@gmail.com>
-Date: Thu, 2 Jul 2026 13:47:52 -0300
+Date: Thu, 2 Jul 2026 13:58:26 -0300
 Subject: [PATCH] feat: live diagram (/live, /live/:schemaId) + Publish to Live
 
 Serve JSONs de export de diagrama via Nginx a partir de um volume montado,
-auto-importa no IndexedDB ao abrir a pagina, e permite publicar o diagrama
-atual de volta no volume via WebDAV PUT (botao Publish to Live). Suporte a
-multiplos schemas, sem conexao com o banco em runtime.
+auto-importa no IndexedDB ao abrir a pagina, e publica o diagrama atual de
+volta no volume via WebDAV PUT (botao Publish to Live). Multiplos schemas,
+sem conexao com o banco em runtime.
 
 Base: upstream chartdb/chartdb v1.20.1 (c24936a)
 ---
  Dockerfile                                    |   2 +
- LIVE-DIAGRAM.md                               | 179 ++++++++++++++++++
+ LIVE-DIAGRAM.md                               | 197 ++++++++++++++++++
  default.conf.template                         |  16 ++
- schema-data-sample/demo.json                  |  86 +++++++++
+ entrypoint.sh                                 |   5 +
+ schema-data-sample/demo.json                  |  86 ++++++++
  schema-data-sample/index.json                 |   3 +
  src/hooks/use-publish-live.tsx                |  93 +++++++++
  src/lib/live-schemas.ts                       |  28 +++
  .../editor-page/top-navbar/menu/menu.tsx      |   5 +
- .../live-diagram-page/live-diagram-page.tsx   | 101 ++++++++++
- src/pages/live-index-page/live-index-page.tsx |  68 +++++++
+ .../live-diagram-page/live-diagram-page.tsx   | 101 +++++++++
+ src/pages/live-index-page/live-index-page.tsx |  68 ++++++
  src/router.tsx                                |  20 ++
- 11 files changed, 601 insertions(+)
+ 12 files changed, 624 insertions(+)
  create mode 100644 LIVE-DIAGRAM.md
  create mode 100644 schema-data-sample/demo.json
  create mode 100644 schema-data-sample/index.json
@@ -45,10 +46,10 @@ index 1085241..8e3eb72 100644
  FROM nginx:stable-alpine AS production
 diff --git a/LIVE-DIAGRAM.md b/LIVE-DIAGRAM.md
 new file mode 100644
-index 0000000..f8e75dd
+index 0000000..9a9ccbf
 --- /dev/null
 +++ b/LIVE-DIAGRAM.md
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,197 @@
 +# Live Diagram — fork do ChartDB self-hosted
 +
 +Este fork adiciona ao ChartDB self-hosted a funcionalidade **Live Diagram**: uma URL
@@ -167,10 +168,28 @@ index 0000000..f8e75dd
 +- **Repositório**: `mateusrovedaa/chartdb-with-storage`, branch `main`
 +- **Build Pack**: Dockerfile (o `Dockerfile` do fork)
 +- **Build Args**: os mesmos `VITE_*` de antes
-+- **Volume (leitura-escrita, para o Publish to Live)**:
-+  `/host/chartdb-schema:/usr/share/nginx/schema-data`
-+  (use `:ro` apenas se for abrir mão do Publish to Live e só alimentar por job externo)
 +- **Proxy com Basic Auth** à frente, protegendo `PUT`/`DELETE` em `/schema-data/`
++
++### Volume no Coolify
++
++Em **Storages** do recurso, adicione um volume com destino
++`/usr/share/nginx/schema-data`. Duas opções:
++
++- **Volume Mount (named volume)** — recomendado. O Coolify gerencia e persiste entre
++  deploys. Nasce com dono `root`, mas o `entrypoint.sh` faz `chown` para o usuário
++  `nginx` (uid 101) no boot, então o `PUT` do Publish to Live já funciona.
++  - Name: ex. `chartdb-schema-data`
++  - Destination Path: `/usr/share/nginx/schema-data`
++- **Bind Mount** — se quiser o diretório visível no host (ex.: um job externo também
++  escreve nele). Source Path no host + Destination `/usr/share/nginx/schema-data`.
++
++Volumes no Coolify são **leitura-escrita** por padrão — é o que o Publish to Live precisa.
++Não marque como read-only, senão o `PUT` falha (500) e o `chown` do entrypoint é ignorado.
++Se optar por alimentar **só** por job externo (sem Publish), aí sim pode deixar read-only.
++
++> Testado localmente: named volume novo (dono root) + `chown` do entrypoint → `PUT` 201,
++> arquivos persistem no volume como `nginx:nginx`. Boot com volume `:ro` também sobe
++> normal (só o `PUT` fica indisponível, como esperado).
 +
 +O `id` de cada schema precisa casar `^[a-z0-9-_]+$`. `index.json`:
 +
@@ -229,7 +248,7 @@ index 0000000..f8e75dd
 +AGPL pode exigir disponibilizar o código-fonte modificado para quem acessa o serviço —
 +confirmar com jurídico/compliance se aplicável.
 diff --git a/default.conf.template b/default.conf.template
-index 0bea3e7..98bb7bc 100644
+index 0bea3e7..50a8141 100644
 --- a/default.conf.template
 +++ b/default.conf.template
 @@ -8,6 +8,22 @@ server {
@@ -237,24 +256,39 @@ index 0bea3e7..98bb7bc 100644
      }
  
 +    location /schema-data/ {
-+        alias /usr/share/nginx/schema-data/;
++        root /usr/share/nginx;
 +        add_header Cache-Control "no-cache";
 +
 +        # Escrita via WebDAV para o botao "Publish to Live" (PUT do JSON).
 +        # A autenticacao fica no proxy reverso a frente desta instancia.
-+        # Requer o volume montado como leitura-ESCRITA (sem :ro).
++        # Requer o volume montado como leitura-ESCRITA (sem :ro) e gravavel
++        # pelo worker do nginx (uid 101) — o entrypoint faz o chown.
++        # O nginx copia entre filesystems (EXDEV) sozinho, entao nao ha
++        # necessidade de client_body_temp_path dentro do volume.
 +        dav_methods PUT DELETE;
 +        create_full_put_path on;
 +        dav_access user:rw group:rw all:r;
 +        client_max_body_size 20m;
-+        # O temp precisa estar na MESMA filesystem do volume, senao o rename
-+        # do PUT falha com EXDEV (cross-device) em bind mount.
-+        client_body_temp_path /usr/share/nginx/schema-data/.tmp;
 +    }
 +
      location /config.js {
          default_type application/javascript;
          return 200 "window.env = {
+diff --git a/entrypoint.sh b/entrypoint.sh
+index 3214c40..bc48436 100644
+--- a/entrypoint.sh
++++ b/entrypoint.sh
+@@ -3,5 +3,10 @@
+ # Replace placeholders in nginx.conf
+ envsubst '${OPENAI_API_KEY} ${OPENAI_API_ENDPOINT} ${LLM_MODEL_NAME} ${HIDE_CHARTDB_CLOUD} ${DISABLE_ANALYTICS}' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf
+ 
++# Torna o volume de schemas gravavel pelo worker do nginx (uid 101), para o
++# botao "Publish to Live" (PUT). Silencioso e nao-fatal se o volume for :ro
++# (modo somente-leitura, alimentado por job externo).
++chown -R nginx:nginx /usr/share/nginx/schema-data 2>/dev/null || true
++
+ # Start Nginx
+ nginx -g "daemon off;"
 diff --git a/schema-data-sample/demo.json b/schema-data-sample/demo.json
 new file mode 100644
 index 0000000..b34ca1d
