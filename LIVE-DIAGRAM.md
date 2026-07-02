@@ -55,8 +55,8 @@ atualizado"; não é edição colaborativa em tempo real.
 | `src/lib/live-schemas.ts` | **novo** — fetch do índice, validação de id, id do diagrama |
 | `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
 | `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático via `diagramFromJSONInput` |
-| `src/hooks/use-publish-live.tsx` | **novo** — publica o diagrama atual no volume via `PUT` |
-| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** no menu Export as |
+| `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (botão) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
+| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** + chamada do auto-sync |
 | `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 
 Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
@@ -77,13 +77,30 @@ item **Publish to Live**. Ao clicar, o app:
 Fluxo final: cria/edita o diagrama → **Publish to Live** → `/live/{id}` já reflete. A
 escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
 
+### Auto-sync ao editar um diagrama live
+
+Um diagrama aberto via `/live/{id}` recebe um id fixo `live-{id}` no IndexedDB — por isso
+o app te leva para `/diagrams/live-{id}` (comportamento esperado, id estável para não
+duplicar). A partir daí, `useAutoPublishLive` **sincroniza as edições de volta pro volume
+automaticamente**: a cada alteração salva, faz o `PUT` do JSON (com debounce de ~1,2s) e
+atualiza o `index.json`. Assim:
+
+- Editar e reabrir em outra aba/navegador via `/live/{id}` reflete a última versão.
+- Reabrir `/live/{id}` re-importa do volume — que agora está em dia com suas edições, então
+  nada se perde.
+
+O auto-sync vale **apenas** para diagramas abertos via `/live` (id `live-*`); diagramas
+locais comuns não são enviados a lugar nenhum. Janela conhecida: se você editar e fechar a
+aba em menos de ~1,2s, aquele último lote pode não ter sido publicado ainda.
+
 **Pré-requisitos e segurança:**
 - O volume precisa estar montado como **leitura-escrita** (sem `:ro`), senão o `PUT` falha.
 - O endpoint `PUT`/`DELETE` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
   **proxy reverso à frente** da instância. Sem esse proxy, qualquer um na rede pode
   sobrescrever/apagar schemas.
-- Continua não sendo colaboração em tempo real: quem abre `/live` importa pro próprio
-  IndexedDB. O Publish centraliza a *fonte*, não a sessão de edição.
+- Não é edição colaborativa em tempo real: cada navegador tem seu IndexedDB. O que se
+  centraliza é a *fonte* (o JSON no volume); dois editores simultâneos sobrescrevem um ao
+  outro (último a salvar vence).
 
 ## Como testar
 

@@ -13,7 +13,7 @@ import {
     MenubarTrigger,
 } from '@/components/menubar/menubar';
 import { useChartDB } from '@/hooks/use-chartdb';
-import { usePublishLive } from '@/hooks/use-publish-live';
+import { useAutoPublishLive, usePublishLive } from '@/hooks/use-publish-live';
 import { useDialog } from '@/hooks/use-dialog';
 import { useExportImage } from '@/hooks/use-export-image';
 import { databaseTypeToLabelMap } from '@/lib/databases';
@@ -65,6 +65,7 @@ export const Menu: React.FC<MenuProps> = () => {
     } = useLocalConfig();
     const { t } = useTranslation();
     const { publishLive, isPublishing } = usePublishLive();
+    useAutoPublishLive();
     const { redo, undo, hasRedo, hasUndo } = useHistory();
     const { exportImage } = useExportImage();
     const navigate = useNavigate();
