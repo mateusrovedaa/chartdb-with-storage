@@ -130,6 +130,26 @@ const routes: RouteObject[] = [
         },
     },
     {
+        path: 'live',
+        async lazy() {
+            const { LiveIndexPage } =
+                await import('./pages/live-index-page/live-index-page');
+            return {
+                element: <LiveIndexPage />,
+            };
+        },
+    },
+    {
+        path: 'live/:schemaId',
+        async lazy() {
+            const { LiveDiagramPage } =
+                await import('./pages/live-diagram-page/live-diagram-page');
+            return {
+                element: <LiveDiagramPage />,
+            };
+        },
+    },
+    {
         path: '*',
         async lazy() {
             const { NotFoundPage } =

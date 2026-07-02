@@ -8,6 +8,11 @@ server {
 	    try_files  $uri $uri/ /index.html;
     }
 
+    location /schema-data/ {
+        alias /usr/share/nginx/schema-data/;
+        add_header Cache-Control "no-cache";
+    }
+
     location /config.js {
         default_type application/javascript;
         return 200 "window.env = {

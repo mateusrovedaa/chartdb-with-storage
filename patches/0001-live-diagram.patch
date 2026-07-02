@@ -1,0 +1,308 @@
+From c1ff3a238954083382206e7ef4621648aff9ef2e Mon Sep 17 00:00:00 2001
+From: live-diagram <noreply@local>
+Date: Thu, 2 Jul 2026 11:42:31 -0300
+Subject: [PATCH] feat: live diagram routes (/live, /live/:schemaId)
+
+Serve schema JSONs from a mounted volume via Nginx and auto-import
+them into the browser IndexedDB on page load, with multi-schema support.
+
+Base: upstream chartdb/chartdb v1.20.1 (c24936a)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ default.conf.template                         |   5 +
+ src/lib/live-schemas.ts                       |  38 ++++++
+ .../live-diagram-page/live-diagram-page.tsx   | 112 ++++++++++++++++++
+ src/pages/live-index-page/live-index-page.tsx |  68 +++++++++++
+ src/router.tsx                                |  20 ++++
+ 5 files changed, 243 insertions(+)
+ create mode 100644 src/lib/live-schemas.ts
+ create mode 100644 src/pages/live-diagram-page/live-diagram-page.tsx
+ create mode 100644 src/pages/live-index-page/live-index-page.tsx
+
+diff --git a/default.conf.template b/default.conf.template
+index 0bea3e7..7a5dcbd 100644
+--- a/default.conf.template
++++ b/default.conf.template
+@@ -8,6 +8,11 @@ server {
+ 	    try_files  $uri $uri/ /index.html;
+     }
+ 
++    location /schema-data/ {
++        alias /usr/share/nginx/schema-data/;
++        add_header Cache-Control "no-cache";
++    }
++
+     location /config.js {
+         default_type application/javascript;
+         return 200 "window.env = {
+diff --git a/src/lib/live-schemas.ts b/src/lib/live-schemas.ts
+new file mode 100644
+index 0000000..f83a261
+--- /dev/null
++++ b/src/lib/live-schemas.ts
+@@ -0,0 +1,38 @@
++import { DatabaseType } from '@/lib/domain';
++
++export interface LiveSchemaIndexEntry {
++    id: string;
++    name?: string;
++    databaseType?: string;
++    updatedAt?: string;
++}
++
++export const LIVE_SCHEMA_ID_REGEX = /^[a-z0-9-_]+$/;
++
++export const isValidLiveSchemaId = (schemaId: string): boolean =>
++    LIVE_SCHEMA_ID_REGEX.test(schemaId);
++
++export const liveDiagramId = (schemaId: string): string => `live-${schemaId}`;
++
++export const fetchLiveSchemaIndex = async (): Promise<
++    LiveSchemaIndexEntry[]
++> => {
++    const response = await fetch('/schema-data/index.json', {
++        cache: 'no-store',
++    });
++
++    if (!response.ok) {
++        throw new Error(`Failed to load schema index (${response.status})`);
++    }
++
++    const entries = (await response.json()) as LiveSchemaIndexEntry[];
++
++    return entries.filter((entry) => isValidLiveSchemaId(entry.id));
++};
++
++export const parseLiveSchemaDatabaseType = (
++    databaseType?: string
++): DatabaseType =>
++    Object.values(DatabaseType).includes(databaseType as DatabaseType)
++        ? (databaseType as DatabaseType)
++        : DatabaseType.GENERIC;
+diff --git a/src/pages/live-diagram-page/live-diagram-page.tsx b/src/pages/live-diagram-page/live-diagram-page.tsx
+new file mode 100644
+index 0000000..742b4c4
+--- /dev/null
++++ b/src/pages/live-diagram-page/live-diagram-page.tsx
+@@ -0,0 +1,112 @@
++import { Spinner } from '@/components/spinner/spinner';
++import React, { useCallback, useEffect, useRef, useState } from 'react';
++import { Link, useNavigate, useParams } from 'react-router-dom';
++import type { Diagram } from '@/lib/domain/diagram';
++import { useStorage } from '@/hooks/use-storage';
++import { LocalConfigProvider } from '@/context/local-config-context/local-config-provider';
++import { StorageProvider } from '@/context/storage-context/storage-provider';
++import { ThemeProvider } from '@/context/theme-context/theme-provider';
++import { loadDatabaseMetadata } from '@/lib/data/import-metadata/metadata-types/database-metadata';
++import { loadFromDatabaseMetadata } from '@/lib/data/import-metadata/import';
++import {
++    fetchLiveSchemaIndex,
++    isValidLiveSchemaId,
++    liveDiagramId,
++    parseLiveSchemaDatabaseType,
++} from '@/lib/live-schemas';
++
++export const LiveDiagramComponent: React.FC = () => {
++    const navigate = useNavigate();
++    const { addDiagram, deleteDiagram } = useStorage();
++    const importedBefore = useRef<boolean>(false);
++    const { schemaId } = useParams<{ schemaId: string }>();
++    const [error, setError] = useState<string>();
++
++    const importSchema = useCallback(async () => {
++        if (!schemaId || !isValidLiveSchemaId(schemaId)) {
++            setError(`Invalid schema id: ${schemaId}`);
++            return;
++        }
++
++        if (importedBefore.current) {
++            return;
++        }
++
++        importedBefore.current = true;
++
++        try {
++            const response = await fetch(`/schema-data/${schemaId}.json`, {
++                cache: 'no-store',
++            });
++
++            if (!response.ok) {
++                setError(`Schema "${schemaId}" not found (${response.status})`);
++                return;
++            }
++
++            const indexEntry = await fetchLiveSchemaIndex()
++                .then((entries) =>
++                    entries.find((entry) => entry.id === schemaId)
++                )
++                .catch(() => undefined);
++
++            const databaseMetadata = loadDatabaseMetadata(
++                await response.text()
++            );
++
++            const diagram = await loadFromDatabaseMetadata({
++                databaseType: parseLiveSchemaDatabaseType(
++                    indexEntry?.databaseType
++                ),
++                databaseMetadata,
++            });
++
++            const now = new Date();
++            const diagramToAdd: Diagram = {
++                ...diagram,
++                id: liveDiagramId(schemaId),
++                name: indexEntry?.name ?? schemaId,
++                createdAt: now,
++                updatedAt: now,
++            };
++
++            await deleteDiagram(diagramToAdd.id);
++            await addDiagram({ diagram: diagramToAdd });
++            navigate(`/diagrams/${diagramToAdd.id}`);
++        } catch (e) {
++            setError(e instanceof Error ? e.message : 'Failed to import');
++        }
++    }, [addDiagram, deleteDiagram, navigate, schemaId]);
++
++    useEffect(() => {
++        importSchema();
++    }, [importSchema]);
++
++    if (error) {
++        return (
++            <section className="flex w-screen flex-col items-center bg-background p-10">
++                <h1 className="text-xl font-semibold">Live Diagram</h1>
++                <p className="mt-4 text-muted-foreground">{error}</p>
++                <Link to="/live" className="mt-4 underline">
++                    Back to schema list
++                </Link>
++            </section>
++        );
++    }
++
++    return (
++        <section className="flex w-screen flex-col bg-background">
++            <Spinner size={'large'} className="mt-20 text-pink-600" />
++        </section>
++    );
++};
++
++export const LiveDiagramPage: React.FC = () => (
++    <LocalConfigProvider>
++        <StorageProvider>
++            <ThemeProvider>
++                <LiveDiagramComponent />
++            </ThemeProvider>
++        </StorageProvider>
++    </LocalConfigProvider>
++);
+diff --git a/src/pages/live-index-page/live-index-page.tsx b/src/pages/live-index-page/live-index-page.tsx
+new file mode 100644
+index 0000000..bec5d54
+--- /dev/null
++++ b/src/pages/live-index-page/live-index-page.tsx
+@@ -0,0 +1,68 @@
++import { Spinner } from '@/components/spinner/spinner';
++import React, { useEffect, useState } from 'react';
++import { Link } from 'react-router-dom';
++import type { LiveSchemaIndexEntry } from '@/lib/live-schemas';
++import { fetchLiveSchemaIndex } from '@/lib/live-schemas';
++
++export const LiveIndexPage: React.FC = () => {
++    const [schemas, setSchemas] = useState<LiveSchemaIndexEntry[]>();
++    const [error, setError] = useState<string>();
++
++    useEffect(() => {
++        fetchLiveSchemaIndex()
++            .then(setSchemas)
++            .catch((e: Error) => setError(e.message));
++    }, []);
++
++    if (error) {
++        return (
++            <section className="flex w-screen flex-col items-center bg-background p-10">
++                <h1 className="text-xl font-semibold">Live Diagrams</h1>
++                <p className="mt-4 text-muted-foreground">
++                    Could not load the schema index: {error}
++                </p>
++            </section>
++        );
++    }
++
++    if (!schemas) {
++        return (
++            <section className="flex w-screen flex-col bg-background">
++                <Spinner size={'large'} className="mt-20 text-pink-600" />
++            </section>
++        );
++    }
++
++    return (
++        <section className="flex w-screen flex-col items-center bg-background p-10">
++            <h1 className="text-xl font-semibold">Live Diagrams</h1>
++            <ul className="mt-6 w-full max-w-md space-y-2">
++                {schemas.map((schema) => (
++                    <li key={schema.id}>
++                        <Link
++                            to={`/live/${schema.id}`}
++                            className="flex flex-col rounded-md border p-4 hover:bg-accent"
++                        >
++                            <span className="font-medium">
++                                {schema.name ?? schema.id}
++                            </span>
++                            {schema.updatedAt ? (
++                                <span className="text-sm text-muted-foreground">
++                                    Updated:{' '}
++                                    {new Date(
++                                        schema.updatedAt
++                                    ).toLocaleString()}
++                                </span>
++                            ) : null}
++                        </Link>
++                    </li>
++                ))}
++                {schemas.length === 0 ? (
++                    <li className="text-muted-foreground">
++                        No schemas available yet.
++                    </li>
++                ) : null}
++            </ul>
++        </section>
++    );
++};
+diff --git a/src/router.tsx b/src/router.tsx
+index 37c7bf1..2173c5b 100644
+--- a/src/router.tsx
++++ b/src/router.tsx
+@@ -129,6 +129,26 @@ const routes: RouteObject[] = [
+             };
+         },
+     },
++    {
++        path: 'live',
++        async lazy() {
++            const { LiveIndexPage } =
++                await import('./pages/live-index-page/live-index-page');
++            return {
++                element: <LiveIndexPage />,
++            };
++        },
++    },
++    {
++        path: 'live/:schemaId',
++        async lazy() {
++            const { LiveDiagramPage } =
++                await import('./pages/live-diagram-page/live-diagram-page');
++            return {
++                element: <LiveDiagramPage />,
++            };
++        },
++    },
+     {
+         path: '*',
+         async lazy() {
+-- 
+2.47.3
+
