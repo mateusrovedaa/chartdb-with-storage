@@ -1,36 +1,34 @@
-From d59d356a5a03569d17d673e6861201305a36e970 Mon Sep 17 00:00:00 2001
+From 16a3587c6e62fbb10b6564868e456717df032a32 Mon Sep 17 00:00:00 2001
 From: Mateus Roveda <mateusroveda04@gmail.com>
-Date: Thu, 2 Jul 2026 14:09:49 -0300
+Date: Thu, 2 Jul 2026 14:28:31 -0300
 Subject: [PATCH] feat: live diagram (/live, /live/:schemaId) + Publish to Live
  + auto-sync
 
-Serve JSONs de export de diagrama via Nginx a partir de um volume montado,
-auto-importa no IndexedDB ao abrir a pagina, publica o diagrama atual de
-volta no volume via WebDAV PUT (botao Publish to Live) e sincroniza edicoes
-de diagramas live automaticamente. Multiplos schemas, sem conexao com o
-banco em runtime.
+/live/:schemaId renderiza o editor na propria URL (bookmarkavel), importa
+o JSON de export do volume, auto-importa no IndexedDB, publica de volta via
+WebDAV PUT (botao Publish to Live) e sincroniza edicoes automaticamente.
+Multiplos schemas, sem conexao com o banco em runtime.
 
 Base: upstream chartdb/chartdb v1.20.1 (c24936a)
 ---
  Dockerfile                                    |   2 +
- LIVE-DIAGRAM.md                               | 214 ++++++++++++++++++
+ LIVE-DIAGRAM.md                               | 217 ++++++++++++++++++
  default.conf.template                         |  16 ++
  entrypoint.sh                                 |   5 +
  schema-data-sample/demo.json                  |  86 +++++++
  schema-data-sample/index.json                 |   3 +
  src/hooks/use-publish-live.tsx                | 158 +++++++++++++
- src/lib/live-schemas.ts                       |  28 +++
+ src/lib/live-schemas.ts                       |  61 +++++
  .../editor-page/top-navbar/menu/menu.tsx      |   6 +
- .../live-diagram-page/live-diagram-page.tsx   | 101 +++++++++
+ src/pages/editor-page/use-diagram-loader.tsx  |  35 ++-
  src/pages/live-index-page/live-index-page.tsx |  68 ++++++
- src/router.tsx                                |  20 ++
- 12 files changed, 707 insertions(+)
+ src/router.tsx                                |  12 +-
+ 12 files changed, 666 insertions(+), 3 deletions(-)
  create mode 100644 LIVE-DIAGRAM.md
  create mode 100644 schema-data-sample/demo.json
  create mode 100644 schema-data-sample/index.json
  create mode 100644 src/hooks/use-publish-live.tsx
  create mode 100644 src/lib/live-schemas.ts
- create mode 100644 src/pages/live-diagram-page/live-diagram-page.tsx
  create mode 100644 src/pages/live-index-page/live-index-page.tsx
 
 diff --git a/Dockerfile b/Dockerfile
@@ -48,10 +46,10 @@ index 1085241..8e3eb72 100644
  FROM nginx:stable-alpine AS production
 diff --git a/LIVE-DIAGRAM.md b/LIVE-DIAGRAM.md
 new file mode 100644
-index 0000000..75370dd
+index 0000000..85c3f0e
 --- /dev/null
 +++ b/LIVE-DIAGRAM.md
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,217 @@
 +# Live Diagram — fork do ChartDB self-hosted
 +
 +Este fork adiciona ao ChartDB self-hosted a funcionalidade **Live Diagram**: uma URL
@@ -89,10 +87,11 @@ index 0000000..75370dd
 +                                │
 +        ┌───────────────────────┴──────────────────────┐
 +   rota /live                                  rota /live/:schemaId
-+   lista os schemas de                          fetch /schema-data/{id}.json,
-+   /schema-data/index.json                      diagramFromJSONInput(json),
-+   e linka pra /live/:schemaId                  grava no IndexedDB com id fixo
-+                                                "live-{id}", navega pro diagrama
++   lista os schemas de                          renderiza o EditorPage NA PROPRIA URL:
++   /schema-data/index.json                      fetch /schema-data/{id}.json,
++   e linka pra /live/:schemaId                  diagramFromJSONInput(json), grava no
++                                                IndexedDB com id fixo "live-{id}" e
++                                                abre o editor (URL continua /live/{id})
 +```
 +
 +Cada navegador importa o diagrama para o **seu próprio IndexedDB local**. O que é
@@ -105,17 +104,18 @@ index 0000000..75370dd
 +|---|---|
 +| `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT`/`DELETE` para o Publish to Live |
 +| `Dockerfile` | `NODE_OPTIONS=--max-old-space-size=4096` (vite estoura heap padrão) |
-+| `src/router.tsx` | Rotas `live` e `live/:schemaId` (antes do catch-all `*`) |
-+| `src/lib/live-schemas.ts` | **novo** — fetch do índice, validação de id, id do diagrama |
++| `src/router.tsx` | Rota `live` (lista) + `live/:schemaId` renderiza o `EditorPage` (sem redirect) |
++| `src/lib/live-schemas.ts` | **novo** — índice, validação de id, e `fetchLiveDiagram` (busca o JSON do volume) |
 +| `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
-+| `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático via `diagramFromJSONInput` |
++| `src/pages/editor-page/use-diagram-loader.tsx` | lê `:schemaId`, importa do volume e carrega `live-{schemaId}` mantendo a URL |
 +| `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (botão) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
 +| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** + chamada do auto-sync |
 +| `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 +
 +Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
-+ChartDB: `diagramFromJSONInput`, `diagramToJSONOutput`, `useStorage`, `useChartDB`. Ver a
-+seção de atualização.
++ChartDB: `diagramFromJSONInput`, `diagramToJSONOutput`, `useStorage`, `useChartDB`. Além
++disso, `use-diagram-loader.tsx` (arquivo do upstream) foi **modificado** — é o ponto mais
++sensível a rebase; ver a seção de atualização.
 +
 +## Publicar direto do app (Publish to Live) — sem export manual
 +
@@ -133,11 +133,12 @@ index 0000000..75370dd
 +
 +### Auto-sync ao editar um diagrama live
 +
-+Um diagrama aberto via `/live/{id}` recebe um id fixo `live-{id}` no IndexedDB — por isso
-+o app te leva para `/diagrams/live-{id}` (comportamento esperado, id estável para não
-+duplicar). A partir daí, `useAutoPublishLive` **sincroniza as edições de volta pro volume
-+automaticamente**: a cada alteração salva, faz o `PUT` do JSON (com debounce de ~1,2s) e
-+atualiza o `index.json`. Assim:
++Um diagrama aberto via `/live/{id}` é renderizado **na própria URL `/live/{id}`** (o editor
++roda ali, sem redirect pra `/diagrams/...`), então o link é estável e bookmarkável — dar
++F5 re-importa do volume. Internamente ele usa um id fixo `live-{id}` no IndexedDB. A partir
++daí, `useAutoPublishLive` **sincroniza as edições de volta pro volume automaticamente**: a
++cada alteração salva, faz o `PUT` do JSON (com debounce de ~1,2s) e atualiza o `index.json`.
++Assim:
 +
 +- Editar e reabrir em outra aba/navegador via `/live/{id}` reflete a última versão.
 +- Reabrir `/live/{id}` re-importa do volume — que agora está em dia com suas edições, então
@@ -575,10 +576,13 @@ index 0000000..7594374
 +};
 diff --git a/src/lib/live-schemas.ts b/src/lib/live-schemas.ts
 new file mode 100644
-index 0000000..1a04ded
+index 0000000..5b3103b
 --- /dev/null
 +++ b/src/lib/live-schemas.ts
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,61 @@
++import type { Diagram } from '@/lib/domain/diagram';
++import { diagramFromJSONInput } from '@/lib/export-import-utils';
++
 +export interface LiveSchemaIndexEntry {
 +    id: string;
 +    name?: string;
@@ -606,6 +610,36 @@ index 0000000..1a04ded
 +    const entries = (await response.json()) as LiveSchemaIndexEntry[];
 +
 +    return entries.filter((entry) => isValidLiveSchemaId(entry.id));
++};
++
++// Busca o JSON de export do volume e devolve o diagrama pronto para gravar
++// no IndexedDB com id fixo "live-{schemaId}".
++export const fetchLiveDiagram = async (schemaId: string): Promise<Diagram> => {
++    if (!isValidLiveSchemaId(schemaId)) {
++        throw new Error(`Invalid schema id: "${schemaId}"`);
++    }
++
++    const response = await fetch(`/schema-data/${schemaId}.json`, {
++        cache: 'no-store',
++    });
++    if (!response.ok) {
++        throw new Error(`Schema "${schemaId}" not found (${response.status})`);
++    }
++
++    const indexEntry = await fetchLiveSchemaIndex()
++        .then((entries) => entries.find((entry) => entry.id === schemaId))
++        .catch(() => undefined);
++
++    const diagram = diagramFromJSONInput(await response.text());
++    const now = new Date();
++
++    return {
++        ...diagram,
++        id: liveDiagramId(schemaId),
++        name: indexEntry?.name ?? diagram.name ?? schemaId,
++        createdAt: now,
++        updatedAt: now,
++    };
 +};
 diff --git a/src/pages/editor-page/top-navbar/menu/menu.tsx b/src/pages/editor-page/top-navbar/menu/menu.tsx
 index 28c27d6..6155d51 100644
@@ -638,113 +672,81 @@ index 28c27d6..6155d51 100644
                      <MenubarSeparator />
                      <MenubarItem
                          onClick={() =>
-diff --git a/src/pages/live-diagram-page/live-diagram-page.tsx b/src/pages/live-diagram-page/live-diagram-page.tsx
-new file mode 100644
-index 0000000..c1db666
---- /dev/null
-+++ b/src/pages/live-diagram-page/live-diagram-page.tsx
-@@ -0,0 +1,101 @@
-+import { Spinner } from '@/components/spinner/spinner';
-+import React, { useCallback, useEffect, useRef, useState } from 'react';
-+import { Link, useNavigate, useParams } from 'react-router-dom';
-+import type { Diagram } from '@/lib/domain/diagram';
-+import { useStorage } from '@/hooks/use-storage';
-+import { LocalConfigProvider } from '@/context/local-config-context/local-config-provider';
-+import { StorageProvider } from '@/context/storage-context/storage-provider';
-+import { ThemeProvider } from '@/context/theme-context/theme-provider';
-+import { diagramFromJSONInput } from '@/lib/export-import-utils';
-+import {
-+    fetchLiveSchemaIndex,
-+    isValidLiveSchemaId,
-+    liveDiagramId,
-+} from '@/lib/live-schemas';
+diff --git a/src/pages/editor-page/use-diagram-loader.tsx b/src/pages/editor-page/use-diagram-loader.tsx
+index 4848290..8a07bd0 100644
+--- a/src/pages/editor-page/use-diagram-loader.tsx
++++ b/src/pages/editor-page/use-diagram-loader.tsx
+@@ -5,19 +5,26 @@ import { useFullScreenLoader } from '@/hooks/use-full-screen-spinner';
+ import { useRedoUndoStack } from '@/hooks/use-redo-undo-stack';
+ import { useStorage } from '@/hooks/use-storage';
+ import type { Diagram } from '@/lib/domain/diagram';
++import { fetchLiveDiagram, liveDiagramId } from '@/lib/live-schemas';
+ import { useEffect, useRef, useState } from 'react';
+ import { useNavigate, useParams } from 'react-router-dom';
+ 
+ export const useDiagramLoader = () => {
+     const [initialDiagram, setInitialDiagram] = useState<Diagram | undefined>();
+-    const { diagramId } = useParams<{ diagramId: string }>();
++    const { diagramId: diagramIdParam, schemaId } = useParams<{
++        diagramId: string;
++        schemaId: string;
++    }>();
++    // Rota /live/:schemaId renderiza o editor direto (sem redirect); o
++    // diagrama correspondente tem id fixo "live-{schemaId}".
++    const diagramId = schemaId ? liveDiagramId(schemaId) : diagramIdParam;
+     const { config } = useConfig();
+     const { loadDiagram, currentDiagram } = useChartDB();
+     const { resetRedoStack, resetUndoStack } = useRedoUndoStack();
+     const { showLoader, hideLoader } = useFullScreenLoader();
+     const { openCreateDiagramDialog, openOpenDiagramDialog } = useDialog();
+     const navigate = useNavigate();
+-    const { listDiagrams } = useStorage();
++    const { listDiagrams, addDiagram, deleteDiagram } = useStorage();
+ 
+     const currentDiagramLoadingRef = useRef<string | undefined>(undefined);
+ 
+@@ -31,6 +38,27 @@ export const useDiagramLoader = () => {
+         }
+ 
+         const loadDefaultDiagram = async () => {
++            // /live/:schemaId — importa (ou re-importa) o diagrama do volume
++            // antes de carregar, mantendo a URL /live/{schemaId}.
++            if (schemaId) {
++                setInitialDiagram(undefined);
++                showLoader();
++                resetRedoStack();
++                resetUndoStack();
++                try {
++                    const liveDiagram = await fetchLiveDiagram(schemaId);
++                    await deleteDiagram(liveDiagram.id);
++                    await addDiagram({ diagram: liveDiagram });
++                    setInitialDiagram(liveDiagram);
++                    hideLoader();
++                } catch {
++                    hideLoader();
++                    navigate('/live');
++                }
 +
-+export const LiveDiagramComponent: React.FC = () => {
-+    const navigate = useNavigate();
-+    const { addDiagram, deleteDiagram } = useStorage();
-+    const importedBefore = useRef<boolean>(false);
-+    const { schemaId } = useParams<{ schemaId: string }>();
-+    const [error, setError] = useState<string>();
-+
-+    const importSchema = useCallback(async () => {
-+        if (!schemaId || !isValidLiveSchemaId(schemaId)) {
-+            setError(`Invalid schema id: ${schemaId}`);
-+            return;
-+        }
-+
-+        if (importedBefore.current) {
-+            return;
-+        }
-+
-+        importedBefore.current = true;
-+
-+        try {
-+            const response = await fetch(`/schema-data/${schemaId}.json`, {
-+                cache: 'no-store',
-+            });
-+
-+            if (!response.ok) {
-+                setError(`Schema "${schemaId}" not found (${response.status})`);
 +                return;
 +            }
 +
-+            const indexEntry = await fetchLiveSchemaIndex()
-+                .then((entries) =>
-+                    entries.find((entry) => entry.id === schemaId)
-+                )
-+                .catch(() => undefined);
-+
-+            const diagram = diagramFromJSONInput(await response.text());
-+
-+            const now = new Date();
-+            const diagramToAdd: Diagram = {
-+                ...diagram,
-+                id: liveDiagramId(schemaId),
-+                name: indexEntry?.name ?? diagram.name ?? schemaId,
-+                createdAt: now,
-+                updatedAt: now,
-+            };
-+
-+            await deleteDiagram(diagramToAdd.id);
-+            await addDiagram({ diagram: diagramToAdd });
-+            navigate(`/diagrams/${diagramToAdd.id}`);
-+        } catch (e) {
-+            setError(e instanceof Error ? e.message : 'Failed to import');
-+        }
-+    }, [addDiagram, deleteDiagram, navigate, schemaId]);
-+
-+    useEffect(() => {
-+        importSchema();
-+    }, [importSchema]);
-+
-+    if (error) {
-+        return (
-+            <section className="flex w-screen flex-col items-center bg-background p-10">
-+                <h1 className="text-xl font-semibold">Live Diagram</h1>
-+                <p className="mt-4 text-muted-foreground">{error}</p>
-+                <Link to="/live" className="mt-4 underline">
-+                    Back to schema list
-+                </Link>
-+            </section>
-+        );
-+    }
-+
-+    return (
-+        <section className="flex w-screen flex-col bg-background">
-+            <Spinner size={'large'} className="mt-20 text-pink-600" />
-+        </section>
-+    );
-+};
-+
-+export const LiveDiagramPage: React.FC = () => (
-+    <LocalConfigProvider>
-+        <StorageProvider>
-+            <ThemeProvider>
-+                <LiveDiagramComponent />
-+            </ThemeProvider>
-+        </StorageProvider>
-+    </LocalConfigProvider>
-+);
+             if (diagramId) {
+                 setInitialDiagram(undefined);
+                 showLoader();
+@@ -75,10 +103,13 @@ export const useDiagramLoader = () => {
+         loadDefaultDiagram();
+     }, [
+         diagramId,
++        schemaId,
+         openCreateDiagramDialog,
+         config,
+         navigate,
+         listDiagrams,
++        addDiagram,
++        deleteDiagram,
+         loadDiagram,
+         resetRedoStack,
+         resetUndoStack,
 diff --git a/src/pages/live-index-page/live-index-page.tsx b/src/pages/live-index-page/live-index-page.tsx
 new file mode 100644
 index 0000000..bec5d54
@@ -820,10 +822,19 @@ index 0000000..bec5d54
 +    );
 +};
 diff --git a/src/router.tsx b/src/router.tsx
-index 37c7bf1..2173c5b 100644
+index 37c7bf1..35cb626 100644
 --- a/src/router.tsx
 +++ b/src/router.tsx
-@@ -129,6 +129,26 @@ const routes: RouteObject[] = [
+@@ -6,7 +6,7 @@ import type { TemplatesPageLoaderData } from './pages/templates-page/templates-p
+ import { getTemplatesAndAllTags } from './templates-data/template-utils';
+ 
+ const routes: RouteObject[] = [
+-    ...['', 'diagrams/:diagramId'].map((path) => ({
++    ...['', 'diagrams/:diagramId', 'live/:schemaId'].map((path) => ({
+         path,
+         async lazy() {
+             const { EditorPage } =
+@@ -129,6 +129,16 @@ const routes: RouteObject[] = [
              };
          },
      },
@@ -834,16 +845,6 @@ index 37c7bf1..2173c5b 100644
 +                await import('./pages/live-index-page/live-index-page');
 +            return {
 +                element: <LiveIndexPage />,
-+            };
-+        },
-+    },
-+    {
-+        path: 'live/:schemaId',
-+        async lazy() {
-+            const { LiveDiagramPage } =
-+                await import('./pages/live-diagram-page/live-diagram-page');
-+            return {
-+                element: <LiveDiagramPage />,
 +            };
 +        },
 +    },
