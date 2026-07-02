@@ -1,29 +1,32 @@
-From ca5e3bea18f4b33c8fbdf3739e2c3c88184e9f3b Mon Sep 17 00:00:00 2001
+From 94abf9e346cef02f910106f283b00b70fe03940d Mon Sep 17 00:00:00 2001
 From: Mateus Roveda <mateusroveda04@gmail.com>
-Date: Thu, 2 Jul 2026 14:35:25 -0300
+Date: Thu, 2 Jul 2026 14:44:02 -0300
 Subject: [PATCH] feat: live diagram (/live, /live/:schemaId) + Publish to Live
  + auto-sync
 
 Base: upstream chartdb/chartdb v1.20.1 (c24936a)
 ---
  Dockerfile                                    |   2 +
- LIVE-DIAGRAM.md                               | 217 ++++++++++++++++++
+ LIVE-DIAGRAM.md                               | 220 ++++++++++++++++++
  default.conf.template                         |  16 ++
  entrypoint.sh                                 |   5 +
  schema-data-sample/demo.json                  |  86 +++++++
  schema-data-sample/index.json                 |   3 +
- src/hooks/use-publish-live.tsx                | 158 +++++++++++++
+ src/hooks/use-publish-live.tsx                | 161 +++++++++++++
  src/lib/live-schemas.ts                       |  61 +++++
  .../editor-page/top-navbar/menu/menu.tsx      |   6 +
+ .../top-navbar/publish-live-button.tsx        |  21 ++
+ .../editor-page/top-navbar/top-navbar.tsx     |   2 +
  src/pages/editor-page/use-diagram-loader.tsx  |  43 +++-
  src/pages/live-index-page/live-index-page.tsx |  68 ++++++
  src/router.tsx                                |  12 +-
- 12 files changed, 674 insertions(+), 3 deletions(-)
+ 14 files changed, 703 insertions(+), 3 deletions(-)
  create mode 100644 LIVE-DIAGRAM.md
  create mode 100644 schema-data-sample/demo.json
  create mode 100644 schema-data-sample/index.json
  create mode 100644 src/hooks/use-publish-live.tsx
  create mode 100644 src/lib/live-schemas.ts
+ create mode 100644 src/pages/editor-page/top-navbar/publish-live-button.tsx
  create mode 100644 src/pages/live-index-page/live-index-page.tsx
 
 diff --git a/Dockerfile b/Dockerfile
@@ -41,10 +44,10 @@ index 1085241..8e3eb72 100644
  FROM nginx:stable-alpine AS production
 diff --git a/LIVE-DIAGRAM.md b/LIVE-DIAGRAM.md
 new file mode 100644
-index 0000000..85c3f0e
+index 0000000..2293d72
 --- /dev/null
 +++ b/LIVE-DIAGRAM.md
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,220 @@
 +# Live Diagram — fork do ChartDB self-hosted
 +
 +Este fork adiciona ao ChartDB self-hosted a funcionalidade **Live Diagram**: uma URL
@@ -103,8 +106,10 @@ index 0000000..85c3f0e
 +| `src/lib/live-schemas.ts` | **novo** — índice, validação de id, e `fetchLiveDiagram` (busca o JSON do volume) |
 +| `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
 +| `src/pages/editor-page/use-diagram-loader.tsx` | lê `:schemaId`, importa do volume e carrega `live-{schemaId}` mantendo a URL |
-+| `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (botão) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
-+| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** + chamada do auto-sync |
++| `src/hooks/use-publish-live.tsx` | **novo** — `usePublishLive` (publica + redireciona) + `useAutoPublishLive` (sync automático de diagramas `live-*`) |
++| `src/pages/editor-page/top-navbar/publish-live-button.tsx` | **novo** — botão Publish to Live da barra de topo |
++| `src/pages/editor-page/top-navbar/top-navbar.tsx` | inclui o botão perto do "last saved" |
++| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** no Export as + chamada do auto-sync |
 +| `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 +
 +Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
@@ -114,16 +119,17 @@ index 0000000..85c3f0e
 +
 +## Publicar direto do app (Publish to Live) — sem export manual
 +
-+Para não precisar exportar o JSON e jogar no volume à mão, o menu **Export as** ganhou o
-+item **Publish to Live**. Ao clicar, o app:
++Para não precisar exportar o JSON e jogar no volume à mão, há um botão **Publish to Live**
++na barra de topo (ao lado do "last saved") e também no menu **Actions → Export as**. Ao
++clicar, o app:
 +
 +1. Serializa o diagrama atual (`diagramToJSONOutput`).
-+2. Faz `PUT /schema-data/{id}.json` no volume (id = slug do nome do diagrama, validado
-+   contra `^[a-z0-9-_]+$`).
++2. Faz `PUT /schema-data/{id}.json` no volume (id = do diagrama live atual, ou slug do
++   nome para um diagrama novo, validado contra `^[a-z0-9-_]+$`).
 +3. Lê o `index.json`, faz upsert da entrada `{ id, name, updatedAt }` e regrava via `PUT`.
-+4. Mostra um toast com o link `/live/{id}`.
++4. Redireciona para `/live/{id}`, abrindo o diagrama já como live.
 +
-+Fluxo final: cria/edita o diagrama → **Publish to Live** → `/live/{id}` já reflete. A
++Fluxo final: cria/edita o diagrama → **Publish to Live** → cai direto em `/live/{id}`. A
 +escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
 +
 +### Auto-sync ao editar um diagrama live
@@ -407,11 +413,12 @@ index 0000000..acc82a8
 +]
 diff --git a/src/hooks/use-publish-live.tsx b/src/hooks/use-publish-live.tsx
 new file mode 100644
-index 0000000..7594374
+index 0000000..508cca1
 --- /dev/null
 +++ b/src/hooks/use-publish-live.tsx
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,161 @@
 +import { useCallback, useEffect, useRef, useState } from 'react';
++import { useNavigate } from 'react-router-dom';
 +import { useChartDB } from '@/hooks/use-chartdb';
 +import { useToast } from '@/components/toast/use-toast';
 +import { diagramToJSONOutput } from '@/lib/export-import-utils';
@@ -492,6 +499,7 @@ index 0000000..7594374
 +} => {
 +    const { currentDiagram } = useChartDB();
 +    const { toast } = useToast();
++    const navigate = useNavigate();
 +    const [isPublishing, setIsPublishing] = useState<boolean>(false);
 +
 +    const publishLive = useCallback(async () => {
@@ -501,8 +509,9 @@ index 0000000..7594374
 +            await putDiagramToLive(schemaId, currentDiagram);
 +            toast({
 +                title: 'Published to Live',
-+                description: `Available at /live/${schemaId}`,
++                description: `Opening /live/${schemaId}`,
 +            });
++            navigate(`/live/${schemaId}`);
 +        } catch (e) {
 +            toast({
 +                title: 'Publish to Live failed',
@@ -512,7 +521,7 @@ index 0000000..7594374
 +        } finally {
 +            setIsPublishing(false);
 +        }
-+    }, [currentDiagram, toast]);
++    }, [currentDiagram, toast, navigate]);
 +
 +    return { publishLive, isPublishing };
 +};
@@ -667,6 +676,53 @@ index 28c27d6..6155d51 100644
                      <MenubarSeparator />
                      <MenubarItem
                          onClick={() =>
+diff --git a/src/pages/editor-page/top-navbar/publish-live-button.tsx b/src/pages/editor-page/top-navbar/publish-live-button.tsx
+new file mode 100644
+index 0000000..498a6d4
+--- /dev/null
++++ b/src/pages/editor-page/top-navbar/publish-live-button.tsx
+@@ -0,0 +1,21 @@
++import React from 'react';
++import { Button } from '@/components/button/button';
++import { Upload } from 'lucide-react';
++import { usePublishLive } from '@/hooks/use-publish-live';
++
++export const PublishLiveButton: React.FC = () => {
++    const { publishLive, isPublishing } = usePublishLive();
++
++    return (
++        <Button
++            variant="outline"
++            size="sm"
++            className="gap-1"
++            disabled={isPublishing}
++            onClick={publishLive}
++        >
++            <Upload className="size-3.5" />
++            Publish to Live
++        </Button>
++    );
++};
+diff --git a/src/pages/editor-page/top-navbar/top-navbar.tsx b/src/pages/editor-page/top-navbar/top-navbar.tsx
+index fa94dd4..300f530 100644
+--- a/src/pages/editor-page/top-navbar/top-navbar.tsx
++++ b/src/pages/editor-page/top-navbar/top-navbar.tsx
+@@ -6,6 +6,7 @@ import { DiagramName } from './diagram-name';
+ import { LastSaved } from './last-saved';
+ import { LanguageNav } from './language-nav/language-nav';
+ import { Menu } from './menu/menu';
++import { PublishLiveButton } from './publish-live-button';
+ 
+ export interface TopNavbarProps {}
+ 
+@@ -48,6 +49,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = () => {
+             <DiagramName />
+             <div className="hidden flex-1 items-center justify-end gap-2 sm:flex">
+                 <LastSaved />
++                <PublishLiveButton />
+                 {renderStars()}
+                 <LanguageNav />
+             </div>
 diff --git a/src/pages/editor-page/use-diagram-loader.tsx b/src/pages/editor-page/use-diagram-loader.tsx
 index 4848290..1cf2e01 100644
 --- a/src/pages/editor-page/use-diagram-loader.tsx
