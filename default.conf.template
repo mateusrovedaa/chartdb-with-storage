@@ -9,19 +9,19 @@ server {
     }
 
     location /schema-data/ {
-        alias /usr/share/nginx/schema-data/;
+        root /usr/share/nginx;
         add_header Cache-Control "no-cache";
 
         # Escrita via WebDAV para o botao "Publish to Live" (PUT do JSON).
         # A autenticacao fica no proxy reverso a frente desta instancia.
-        # Requer o volume montado como leitura-ESCRITA (sem :ro).
+        # Requer o volume montado como leitura-ESCRITA (sem :ro) e gravavel
+        # pelo worker do nginx (uid 101) — o entrypoint faz o chown.
+        # O nginx copia entre filesystems (EXDEV) sozinho, entao nao ha
+        # necessidade de client_body_temp_path dentro do volume.
         dav_methods PUT DELETE;
         create_full_put_path on;
         dav_access user:rw group:rw all:r;
         client_max_body_size 20m;
-        # O temp precisa estar na MESMA filesystem do volume, senao o rename
-        # do PUT falha com EXDEV (cross-device) em bind mount.
-        client_body_temp_path /usr/share/nginx/schema-data/.tmp;
     }
 
     location /config.js {

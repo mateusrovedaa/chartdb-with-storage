@@ -116,10 +116,28 @@ Aponte o recurso do Coolify para **este fork** (em vez de `chartdb/chartdb`):
 - **Repositório**: `mateusrovedaa/chartdb-with-storage`, branch `main`
 - **Build Pack**: Dockerfile (o `Dockerfile` do fork)
 - **Build Args**: os mesmos `VITE_*` de antes
-- **Volume (leitura-escrita, para o Publish to Live)**:
-  `/host/chartdb-schema:/usr/share/nginx/schema-data`
-  (use `:ro` apenas se for abrir mão do Publish to Live e só alimentar por job externo)
 - **Proxy com Basic Auth** à frente, protegendo `PUT`/`DELETE` em `/schema-data/`
+
+### Volume no Coolify
+
+Em **Storages** do recurso, adicione um volume com destino
+`/usr/share/nginx/schema-data`. Duas opções:
+
+- **Volume Mount (named volume)** — recomendado. O Coolify gerencia e persiste entre
+  deploys. Nasce com dono `root`, mas o `entrypoint.sh` faz `chown` para o usuário
+  `nginx` (uid 101) no boot, então o `PUT` do Publish to Live já funciona.
+  - Name: ex. `chartdb-schema-data`
+  - Destination Path: `/usr/share/nginx/schema-data`
+- **Bind Mount** — se quiser o diretório visível no host (ex.: um job externo também
+  escreve nele). Source Path no host + Destination `/usr/share/nginx/schema-data`.
+
+Volumes no Coolify são **leitura-escrita** por padrão — é o que o Publish to Live precisa.
+Não marque como read-only, senão o `PUT` falha (500) e o `chown` do entrypoint é ignorado.
+Se optar por alimentar **só** por job externo (sem Publish), aí sim pode deixar read-only.
+
+> Testado localmente: named volume novo (dono root) + `chown` do entrypoint → `PUT` 201,
+> arquivos persistem no volume como `nginx:nginx`. Boot com volume `:ro` também sobe
+> normal (só o `PUT` fica indisponível, como esperado).
 
 O `id` de cada schema precisa casar `^[a-z0-9-_]+$`. `index.json`:
 
