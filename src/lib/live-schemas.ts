@@ -1,9 +1,6 @@
-import { DatabaseType } from '@/lib/domain';
-
 export interface LiveSchemaIndexEntry {
     id: string;
     name?: string;
-    databaseType?: string;
     updatedAt?: string;
 }
 
@@ -29,10 +26,3 @@ export const fetchLiveSchemaIndex = async (): Promise<
 
     return entries.filter((entry) => isValidLiveSchemaId(entry.id));
 };
-
-export const parseLiveSchemaDatabaseType = (
-    databaseType?: string
-): DatabaseType =>
-    Object.values(DatabaseType).includes(databaseType as DatabaseType)
-        ? (databaseType as DatabaseType)
-        : DatabaseType.GENERIC;

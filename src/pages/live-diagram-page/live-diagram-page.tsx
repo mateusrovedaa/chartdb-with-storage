@@ -6,13 +6,11 @@ import { useStorage } from '@/hooks/use-storage';
 import { LocalConfigProvider } from '@/context/local-config-context/local-config-provider';
 import { StorageProvider } from '@/context/storage-context/storage-provider';
 import { ThemeProvider } from '@/context/theme-context/theme-provider';
-import { loadDatabaseMetadata } from '@/lib/data/import-metadata/metadata-types/database-metadata';
-import { loadFromDatabaseMetadata } from '@/lib/data/import-metadata/import';
+import { diagramFromJSONInput } from '@/lib/export-import-utils';
 import {
     fetchLiveSchemaIndex,
     isValidLiveSchemaId,
     liveDiagramId,
-    parseLiveSchemaDatabaseType,
 } from '@/lib/live-schemas';
 
 export const LiveDiagramComponent: React.FC = () => {
@@ -50,22 +48,13 @@ export const LiveDiagramComponent: React.FC = () => {
                 )
                 .catch(() => undefined);
 
-            const databaseMetadata = loadDatabaseMetadata(
-                await response.text()
-            );
-
-            const diagram = await loadFromDatabaseMetadata({
-                databaseType: parseLiveSchemaDatabaseType(
-                    indexEntry?.databaseType
-                ),
-                databaseMetadata,
-            });
+            const diagram = diagramFromJSONInput(await response.text());
 
             const now = new Date();
             const diagramToAdd: Diagram = {
                 ...diagram,
                 id: liveDiagramId(schemaId),
-                name: indexEntry?.name ?? schemaId,
+                name: indexEntry?.name ?? diagram.name ?? schemaId,
                 createdAt: now,
                 updatedAt: now,
             };

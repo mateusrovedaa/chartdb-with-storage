@@ -1,0 +1,86 @@
+{
+    "id": "sample",
+    "name": "Demo DB",
+    "databaseType": "postgresql",
+    "tables": [
+        {
+            "id": "t-users",
+            "name": "users",
+            "schema": "public",
+            "x": 100,
+            "y": 100,
+            "color": "#b067e9",
+            "isView": false,
+            "createdAt": 1730000000000,
+            "indexes": [],
+            "fields": [
+                {
+                    "id": "f-users-id",
+                    "name": "id",
+                    "type": { "id": "bigint", "name": "bigint" },
+                    "primaryKey": true,
+                    "unique": true,
+                    "nullable": false,
+                    "increment": true,
+                    "createdAt": 1730000000000
+                },
+                {
+                    "id": "f-users-email",
+                    "name": "email",
+                    "type": { "id": "varchar", "name": "varchar" },
+                    "primaryKey": false,
+                    "unique": true,
+                    "nullable": false,
+                    "createdAt": 1730000000000
+                }
+            ]
+        },
+        {
+            "id": "t-orders",
+            "name": "orders",
+            "schema": "public",
+            "x": 500,
+            "y": 100,
+            "color": "#67e9b0",
+            "isView": false,
+            "createdAt": 1730000000000,
+            "indexes": [],
+            "fields": [
+                {
+                    "id": "f-orders-id",
+                    "name": "id",
+                    "type": { "id": "bigint", "name": "bigint" },
+                    "primaryKey": true,
+                    "unique": true,
+                    "nullable": false,
+                    "increment": true,
+                    "createdAt": 1730000000000
+                },
+                {
+                    "id": "f-orders-user-id",
+                    "name": "user_id",
+                    "type": { "id": "bigint", "name": "bigint" },
+                    "primaryKey": false,
+                    "unique": false,
+                    "nullable": false,
+                    "createdAt": 1730000000000
+                }
+            ]
+        }
+    ],
+    "relationships": [
+        {
+            "id": "r-orders-users",
+            "name": "orders_user_id_fkey",
+            "sourceTableId": "t-orders",
+            "targetTableId": "t-users",
+            "sourceFieldId": "f-orders-user-id",
+            "targetFieldId": "f-users-id",
+            "sourceCardinality": "many",
+            "targetCardinality": "one",
+            "createdAt": 1730000000000
+        }
+    ],
+    "createdAt": "2026-07-02T00:00:00.000Z",
+    "updatedAt": "2026-07-02T00:00:00.000Z"
+}

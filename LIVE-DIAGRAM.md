@@ -1,34 +1,47 @@
 # Live Diagram — fork do ChartDB self-hosted
 
 Este fork adiciona ao ChartDB self-hosted a funcionalidade **Live Diagram**: uma URL
-fixa que carrega automaticamente o diagrama mais recente de um schema, sem import
-manual. O JSON do schema é gerado por um job externo, gravado em disco e servido pelo
-Nginx do container.
+fixa que carrega automaticamente um diagrama a partir de um **JSON em disco**, sem import
+manual e **sem conectar no banco**. O JSON é servido pelo Nginx do container a partir de
+um volume montado.
 
 - **Base do upstream**: `chartdb/chartdb` v1.20.1 (commit `c24936a`).
 - **Upstream remoto**: `https://github.com/chartdb/chartdb.git` (remote `upstream`).
 
+## Formato do JSON: export de diagrama (não é a magic query)
+
+A página `/live/:schemaId` consome o **JSON de export de diagrama do próprio ChartDB**
+(`diagramFromJSONInput`), o mesmo formato do botão **Export diagram → JSON** na UI. Ou
+seja: você monta/importa o diagrama uma vez no ChartDB, exporta pra JSON, e joga o arquivo
+no volume. Nada de rodar SQL no banco em runtime.
+
+Como obter o JSON:
+- **Pela UI**: abra um diagrama → menu **Export diagram** → **JSON**. O arquivo baixado é
+  exatamente o que vai em `{id}.json`.
+- **À mão**: veja `schema-data-sample/demo.json` neste repo — é um diagrama mínimo válido
+  (2 tabelas + 1 relação) que serve de template.
+
 ## Como funciona
 
 ```
-[job cron/CI] --escreve--> /host/chartdb-schema/
-                             ├── billing.json
-                             ├── auth.json
-                             └── index.json      (lista os schemas + updatedAt)
-                                    │ (bind mount, read-only)
-                                    ▼
-                   container chartdb (este fork)
-                   Nginx serve tudo em /schema-data/*
-                                    │
-        ┌───────────────────────────┴──────────────────────────┐
-   rota /live                                        rota /live/:schemaId
-   lista os schemas de                                fetch /schema-data/{id}.json,
-   /schema-data/index.json                            importa via loadFromDatabaseMetadata,
-   e linka pra /live/:schemaId                        grava no IndexedDB com id fixo
-                                                       "live-{id}", navega pro diagrama
+[voce/CI] --escreve--> /host/chartdb-schema/
+                         ├── billing.json       (export de diagrama do ChartDB)
+                         ├── auth.json
+                         └── index.json          (lista os schemas + updatedAt)
+                                │ (bind mount, read-only)
+                                ▼
+               container chartdb (este fork)
+               Nginx serve tudo em /schema-data/*
+                                │
+        ┌───────────────────────┴──────────────────────┐
+   rota /live                                  rota /live/:schemaId
+   lista os schemas de                          fetch /schema-data/{id}.json,
+   /schema-data/index.json                      diagramFromJSONInput(json),
+   e linka pra /live/:schemaId                  grava no IndexedDB com id fixo
+                                                "live-{id}", navega pro diagrama
 ```
 
-Cada navegador importa o schema para o **seu próprio IndexedDB local**. O que é
+Cada navegador importa o diagrama para o **seu próprio IndexedDB local**. O que é
 centralizado é a *fonte* (`{id}.json`), não o diagrama. Resolve "abrir e já ver o schema
 atualizado"; não é edição colaborativa em tempo real.
 
@@ -37,111 +50,99 @@ atualizado"; não é edição colaborativa em tempo real.
 | Arquivo | Mudança |
 |---|---|
 | `default.conf.template` | Bloco `location /schema-data/` servindo o volume montado |
+| `Dockerfile` | `NODE_OPTIONS=--max-old-space-size=4096` (vite estoura heap padrão) |
 | `src/router.tsx` | Rotas `live` e `live/:schemaId` (antes do catch-all `*`) |
-| `src/lib/live-schemas.ts` | **novo** — helpers: fetch do índice, validação de id, id do diagrama |
+| `src/lib/live-schemas.ts` | **novo** — fetch do índice, validação de id, id do diagrama |
 | `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
-| `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático |
+| `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático via `diagramFromJSONInput` |
+| `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 
-3 dos 5 arquivos são **novos** (não conflitam em rebase), mas dependem de APIs internas
-do ChartDB: `loadFromDatabaseMetadata`, `loadDatabaseMetadata`, `useStorage`,
-`DatabaseType`. Ver a seção de atualização.
+3 dos arquivos de código são **novos** (não conflitam em rebase), mas dependem de APIs
+internas do ChartDB: `diagramFromJSONInput`, `useStorage`. Ver a seção de atualização.
+
+## Como testar
+
+### Teste local rápido (sem Coolify, sem banco)
+
+```bash
+docker build -t chartdb-live .
+docker run -d -p 8080:80 \
+  -v "$(pwd)/schema-data-sample:/usr/share/nginx/schema-data:ro" \
+  --name chartdb-live chartdb-live
+```
+
+Abra `http://localhost:8080/live` numa aba anônima:
+- Deve listar **Demo DB** (vindo de `index.json`).
+- Clicar → importa e abre o diagrama sozinho, com as tabelas `users`/`orders` e a relação.
+
+Para testar seu próprio diagrama: exporte um pela UI (Export diagram → JSON), salve como
+`schema-data-sample/<seu-id>.json` e adicione a entrada em `index.json`. Refresh em `/live`.
+
+### Teste no Coolify
+
+Depois do deploy (abaixo), com o volume montado, é o mesmo fluxo: `/live` lista, clique
+abre. Rode o job/atualize o `{id}.json` no host + refresh em `/live/{id}` → reflete a
+mudança.
 
 ## Deploy no Coolify
 
 Aponte o recurso do Coolify para **este fork** (em vez de `chartdb/chartdb`):
 
-- **Repositório**: `mateusrovedaa/chartdb-with-storage`
-- **Branch**: `main`
-- **Build Pack**: Dockerfile (o `Dockerfile` do fork, já existente)
-- **Build Args**: os mesmos `VITE_*` de antes (`VITE_OPENAI_API_KEY`, etc.)
-- **Volume (read-only)**: monte o diretório de schemas do host em
-  `/usr/share/nginx/schema-data`:
-  ```
-  /host/chartdb-schema:/usr/share/nginx/schema-data:ro
-  ```
+- **Repositório**: `mateusrovedaa/chartdb-with-storage`, branch `main`
+- **Build Pack**: Dockerfile (o `Dockerfile` do fork)
+- **Build Args**: os mesmos `VITE_*` de antes
+- **Volume (read-only)**: `/host/chartdb-schema:/usr/share/nginx/schema-data:ro`
 
-Como o fork carrega o código, não há wrapper nem `git apply` no deploy — o Dockerfile do
-próprio fork builda a versão já com o patch.
+O `id` de cada schema precisa casar `^[a-z0-9-_]+$`. `index.json`:
 
-> Se o build estourar memória no Coolify, aumente o heap do Node no build:
-> `NODE_OPTIONS=--max-old-space-size=6144` (o `npm run build` do ChartDB é pesado).
+```json
+[
+    { "id": "billing", "name": "Billing DB", "updatedAt": "2026-07-02T03:00:00Z" },
+    { "id": "auth",    "name": "Auth DB",    "updatedAt": "2026-07-02T03:00:00Z" }
+]
+```
 
-### Job que gera os arquivos
+Escrita **atômica** ao atualizar (evita leitura parcial pela UI):
 
-Para cada banco monitorado, rodando em cron/CI/systemd timer:
-
-1. Roda a "magic query" do ChartDB no banco (a mesma que o wizard de import mostra na UI,
-   por tipo de banco). O resultado é o mesmo JSON de metadata que a UI consome.
-2. Escrita **atômica** (evita leitura de arquivo parcial pela UI):
-   ```bash
-   for db in billing auth analytics; do
-     run_magic_query "$db" > "$DEST/$db.json.tmp"
-     mv "$DEST/$db.json.tmp" "$DEST/$db.json"
-   done
-   ```
-3. Regenera o índice:
-   ```json
-   [
-     { "id": "billing", "name": "Billing DB", "databaseType": "postgresql", "updatedAt": "2026-07-02T03:00:00Z" },
-     { "id": "auth",    "name": "Auth DB",    "databaseType": "postgresql", "updatedAt": "2026-07-02T03:00:00Z" }
-   ]
-   ```
-   `databaseType` é opcional (default `generic`); use um dos valores do enum `DatabaseType`
-   (`postgresql`, `mysql`, `sql_server`, `mariadb`, `sqlite`, `clickhouse`, `cockroachdb`,
-   `oracle`, `generic`). O `id` precisa casar `^[a-z0-9-_]+$`.
+```bash
+cp novo-billing.json "$DEST/billing.json.tmp" && mv "$DEST/billing.json.tmp" "$DEST/billing.json"
+```
 
 ## Atualizar para uma versão nova do ChartDB
 
-Este fork usa o fluxo git padrão de fork (remote `upstream` + merge de tag). **Não é
-force-push**, então a branch que o Coolify acompanha não quebra.
+Fluxo git padrão de fork (remote `upstream` + merge de tag), sem force-push:
 
 ```bash
 git fetch upstream --tags
-git merge v1.21.0        # a tag nova do upstream
-# resolver conflitos (prováveis só em default.conf.template e src/router.tsx)
-git commit               # se o merge pausou em conflito
+git merge v1.21.0
+# resolver conflitos (prováveis só em default.conf.template, Dockerfile e src/router.tsx)
 ```
 
-**Existem dois níveis de quebra numa atualização — o segundo é o traiçoeiro:**
+**Dois níveis de quebra — o segundo é o traiçoeiro:**
 
 | Nível | Sintoma | Detecção |
 |---|---|---|
 | Conflito textual | `git merge` para com conflito | Visível na hora |
 | API interna mudou | Merge passa, mas `npm run build`/`tsc` quebra | **Só o build pega** |
 
-Os arquivos novos (`live-schemas.ts`, as duas páginas) nunca dão conflito textual, mas se
-o upstream renomear/alterar `loadFromDatabaseMetadata`, `loadDatabaseMetadata`,
-`useStorage` ou `DatabaseType`, o merge passa e o build falha. **Portanto o teste de
-atualização obrigatoriamente inclui build**, não só o merge:
+Os arquivos novos nunca dão conflito textual, mas se o upstream mudar `diagramFromJSONInput`
+ou `useStorage`, o merge passa e o build falha. **Teste de atualização inclui build:**
 
 ```bash
 npm ci
-NODE_OPTIONS=--max-old-space-size=6144 npm run build   # tem que passar
-npx tsc --noEmit                                        # tem que passar (exit 0)
+NODE_OPTIONS=--max-old-space-size=4096 npm run build   # tem que passar
 ```
 
-Só depois de o build passar, `git push` e deixar o Coolify rebuildar.
+### Patch portátil
 
-### Patch portátil (opcional)
-
-`patches/0001-live-diagram.patch` guarda o diff isolado das mudanças (gerado com
-`git format-patch`). Útil para reaplicar em um clone limpo ou revisar o diff sem o ruído
-do merge:
+`patches/0001-live-diagram.patch` guarda todo o diff da feature (gerado com
+`git format-patch` contra `c24936a`). Reaplicável num clone limpo do upstream:
 
 ```bash
-git apply patches/0001-live-diagram.patch     # aplica sem histórico
+git am patches/0001-live-diagram.patch      # preserva o commit
 # ou
-git am patches/0001-live-diagram.patch        # aplica preservando o commit
+git apply patches/0001-live-diagram.patch   # aplica sem histórico
 ```
-
-## Validação pós-deploy
-
-- `/live` numa aba anônima → lista todos os schemas do `index.json`.
-- Clicar num schema → importa e abre o diagrama sozinho, sem clique adicional.
-- Rodar o job com uma alteração + refresh em `/live/{id}` → diagrama reflete a mudança.
-- `/live/{id}` acessado várias vezes → só um registro `live-{id}` no IndexedDB
-  (o `deleteDiagram` antes do `addDiagram` garante isso).
-- `schemaId` inexistente na URL → erro tratado com link de volta pra `/live`, não quebra.
 
 ## Licença
 
