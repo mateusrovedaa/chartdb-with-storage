@@ -13,6 +13,7 @@ import {
     MenubarTrigger,
 } from '@/components/menubar/menubar';
 import { useChartDB } from '@/hooks/use-chartdb';
+import { usePublishLive } from '@/hooks/use-publish-live';
 import { useDialog } from '@/hooks/use-dialog';
 import { useExportImage } from '@/hooks/use-export-image';
 import { databaseTypeToLabelMap } from '@/lib/databases';
@@ -63,6 +64,7 @@ export const Menu: React.FC<MenuProps> = () => {
         setShowDBViews,
     } = useLocalConfig();
     const { t } = useTranslation();
+    const { publishLive, isPublishing } = usePublishLive();
     const { redo, undo, hasRedo, hasUndo } = useHistory();
     const { exportImage } = useExportImage();
     const navigate = useNavigate();
@@ -307,6 +309,9 @@ export const Menu: React.FC<MenuProps> = () => {
                             </MenubarItem>
                         </MenubarSubContent>
                     </MenubarSub>
+                    <MenubarItem disabled={isPublishing} onClick={publishLive}>
+                        Publish to Live
+                    </MenubarItem>
                     <MenubarSeparator />
                     <MenubarItem
                         onClick={() =>

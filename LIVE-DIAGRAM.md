@@ -49,16 +49,41 @@ atualizado"; não é edição colaborativa em tempo real.
 
 | Arquivo | Mudança |
 |---|---|
-| `default.conf.template` | Bloco `location /schema-data/` servindo o volume montado |
+| `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT`/`DELETE` para o Publish to Live |
 | `Dockerfile` | `NODE_OPTIONS=--max-old-space-size=4096` (vite estoura heap padrão) |
 | `src/router.tsx` | Rotas `live` e `live/:schemaId` (antes do catch-all `*`) |
 | `src/lib/live-schemas.ts` | **novo** — fetch do índice, validação de id, id do diagrama |
 | `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
 | `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático via `diagramFromJSONInput` |
+| `src/hooks/use-publish-live.tsx` | **novo** — publica o diagrama atual no volume via `PUT` |
+| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** no menu Export as |
 | `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 
-3 dos arquivos de código são **novos** (não conflitam em rebase), mas dependem de APIs
-internas do ChartDB: `diagramFromJSONInput`, `useStorage`. Ver a seção de atualização.
+Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
+ChartDB: `diagramFromJSONInput`, `diagramToJSONOutput`, `useStorage`, `useChartDB`. Ver a
+seção de atualização.
+
+## Publicar direto do app (Publish to Live) — sem export manual
+
+Para não precisar exportar o JSON e jogar no volume à mão, o menu **Export as** ganhou o
+item **Publish to Live**. Ao clicar, o app:
+
+1. Serializa o diagrama atual (`diagramToJSONOutput`).
+2. Faz `PUT /schema-data/{id}.json` no volume (id = slug do nome do diagrama, validado
+   contra `^[a-z0-9-_]+$`).
+3. Lê o `index.json`, faz upsert da entrada `{ id, name, updatedAt }` e regrava via `PUT`.
+4. Mostra um toast com o link `/live/{id}`.
+
+Fluxo final: cria/edita o diagrama → **Publish to Live** → `/live/{id}` já reflete. A
+escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
+
+**Pré-requisitos e segurança:**
+- O volume precisa estar montado como **leitura-escrita** (sem `:ro`), senão o `PUT` falha.
+- O endpoint `PUT`/`DELETE` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
+  **proxy reverso à frente** da instância. Sem esse proxy, qualquer um na rede pode
+  sobrescrever/apagar schemas.
+- Continua não sendo colaboração em tempo real: quem abre `/live` importa pro próprio
+  IndexedDB. O Publish centraliza a *fonte*, não a sessão de edição.
 
 ## Como testar
 
@@ -91,7 +116,10 @@ Aponte o recurso do Coolify para **este fork** (em vez de `chartdb/chartdb`):
 - **Repositório**: `mateusrovedaa/chartdb-with-storage`, branch `main`
 - **Build Pack**: Dockerfile (o `Dockerfile` do fork)
 - **Build Args**: os mesmos `VITE_*` de antes
-- **Volume (read-only)**: `/host/chartdb-schema:/usr/share/nginx/schema-data:ro`
+- **Volume (leitura-escrita, para o Publish to Live)**:
+  `/host/chartdb-schema:/usr/share/nginx/schema-data`
+  (use `:ro` apenas se for abrir mão do Publish to Live e só alimentar por job externo)
+- **Proxy com Basic Auth** à frente, protegendo `PUT`/`DELETE` em `/schema-data/`
 
 O `id` de cada schema precisa casar `^[a-z0-9-_]+$`. `index.json`:
 
