@@ -1,26 +1,32 @@
-From 94abf9e346cef02f910106f283b00b70fe03940d Mon Sep 17 00:00:00 2001
+From 6d9d5cd1a29df4612bb3ede5b96956ff3f0b190e Mon Sep 17 00:00:00 2001
 From: Mateus Roveda <mateusroveda04@gmail.com>
-Date: Thu, 2 Jul 2026 14:44:02 -0300
+Date: Thu, 2 Jul 2026 15:02:53 -0300
 Subject: [PATCH] feat: live diagram (/live, /live/:schemaId) + Publish to Live
  + auto-sync
+
+/live/:schemaId renders the editor at its own URL (bookmarkable),
+importing the exported-diagram JSON from a mounted volume served by
+Nginx. Publish to Live writes the current diagram back to the volume
+via WebDAV PUT, and live diagrams auto-sync edits (debounced).
+Multi-schema support, no database connection at runtime.
 
 Base: upstream chartdb/chartdb v1.20.1 (c24936a)
 ---
  Dockerfile                                    |   2 +
- LIVE-DIAGRAM.md                               | 220 ++++++++++++++++++
- default.conf.template                         |  16 ++
+ LIVE-DIAGRAM.md                               | 224 ++++++++++++++++++
+ default.conf.template                         |  17 ++
  entrypoint.sh                                 |   5 +
  schema-data-sample/demo.json                  |  86 +++++++
  schema-data-sample/index.json                 |   3 +
- src/hooks/use-publish-live.tsx                | 161 +++++++++++++
+ src/hooks/use-publish-live.tsx                | 210 ++++++++++++++++
  src/lib/live-schemas.ts                       |  61 +++++
  .../editor-page/top-navbar/menu/menu.tsx      |   6 +
  .../top-navbar/publish-live-button.tsx        |  21 ++
  .../editor-page/top-navbar/top-navbar.tsx     |   2 +
  src/pages/editor-page/use-diagram-loader.tsx  |  43 +++-
- src/pages/live-index-page/live-index-page.tsx |  68 ++++++
+ src/pages/live-index-page/live-index-page.tsx |  78 ++++++
  src/router.tsx                                |  12 +-
- 14 files changed, 703 insertions(+), 3 deletions(-)
+ 14 files changed, 767 insertions(+), 3 deletions(-)
  create mode 100644 LIVE-DIAGRAM.md
  create mode 100644 schema-data-sample/demo.json
  create mode 100644 schema-data-sample/index.json
@@ -44,10 +50,10 @@ index 1085241..8e3eb72 100644
  FROM nginx:stable-alpine AS production
 diff --git a/LIVE-DIAGRAM.md b/LIVE-DIAGRAM.md
 new file mode 100644
-index 0000000..2293d72
+index 0000000..481d057
 --- /dev/null
 +++ b/LIVE-DIAGRAM.md
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,224 @@
 +# Live Diagram — fork do ChartDB self-hosted
 +
 +Este fork adiciona ao ChartDB self-hosted a funcionalidade **Live Diagram**: uma URL
@@ -100,7 +106,7 @@ index 0000000..2293d72
 +
 +| Arquivo | Mudança |
 +|---|---|
-+| `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT`/`DELETE` para o Publish to Live |
++| `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT` para o Publish to Live |
 +| `Dockerfile` | `NODE_OPTIONS=--max-old-space-size=4096` (vite estoura heap padrão) |
 +| `src/router.tsx` | Rota `live` (lista) + `live/:schemaId` renderiza o `EditorPage` (sem redirect) |
 +| `src/lib/live-schemas.ts` | **novo** — índice, validação de id, e `fetchLiveDiagram` (busca o JSON do volume) |
@@ -129,6 +135,10 @@ index 0000000..2293d72
 +3. Lê o `index.json`, faz upsert da entrada `{ id, name, updatedAt }` e regrava via `PUT`.
 +4. Redireciona para `/live/{id}`, abrindo o diagrama já como live.
 +
++Ao publicar um diagrama **novo** (não-live): se o slug já existir no índice, o app pede
++confirmação antes de sobrescrever; após publicar, o diagrama local original é removido
++(ele passa a viver como `live-{id}`, sem duplicata na lista de diagramas).
++
 +Fluxo final: cria/edita o diagrama → **Publish to Live** → cai direto em `/live/{id}`. A
 +escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
 +
@@ -151,7 +161,7 @@ index 0000000..2293d72
 +
 +**Pré-requisitos e segurança:**
 +- O volume precisa estar montado como **leitura-escrita** (sem `:ro`), senão o `PUT` falha.
-+- O endpoint `PUT`/`DELETE` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
++- O endpoint `PUT` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
 +  **proxy reverso à frente** da instância. Sem esse proxy, qualquer um na rede pode
 +  sobrescrever/apagar schemas.
 +- Não é edição colaborativa em tempo real: cada navegador tem seu IndexedDB. O que se
@@ -189,7 +199,7 @@ index 0000000..2293d72
 +- **Repositório**: `mateusrovedaa/chartdb-with-storage`, branch `main`
 +- **Build Pack**: Dockerfile (o `Dockerfile` do fork)
 +- **Build Args**: os mesmos `VITE_*` de antes
-+- **Proxy com Basic Auth** à frente, protegendo `PUT`/`DELETE` em `/schema-data/`
++- **Proxy com Basic Auth** à frente, protegendo `PUT` em `/schema-data/`
 +
 +### Volume no Coolify
 +
@@ -269,10 +279,10 @@ index 0000000..2293d72
 +AGPL pode exigir disponibilizar o código-fonte modificado para quem acessa o serviço —
 +confirmar com jurídico/compliance se aplicável.
 diff --git a/default.conf.template b/default.conf.template
-index 0bea3e7..50a8141 100644
+index 0bea3e7..12e11d7 100644
 --- a/default.conf.template
 +++ b/default.conf.template
-@@ -8,6 +8,22 @@ server {
+@@ -8,6 +8,23 @@ server {
  	    try_files  $uri $uri/ /index.html;
      }
  
@@ -286,7 +296,8 @@ index 0bea3e7..50a8141 100644
 +        # pelo worker do nginx (uid 101) — o entrypoint faz o chown.
 +        # O nginx copia entre filesystems (EXDEV) sozinho, entao nao ha
 +        # necessidade de client_body_temp_path dentro do volume.
-+        dav_methods PUT DELETE;
++        # Apenas PUT: o app so publica; remocao de schema e feita no host.
++        dav_methods PUT;
 +        create_full_put_path on;
 +        dav_access user:rw group:rw all:r;
 +        client_max_body_size 20m;
@@ -413,18 +424,20 @@ index 0000000..acc82a8
 +]
 diff --git a/src/hooks/use-publish-live.tsx b/src/hooks/use-publish-live.tsx
 new file mode 100644
-index 0000000..508cca1
+index 0000000..1763173
 --- /dev/null
 +++ b/src/hooks/use-publish-live.tsx
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,210 @@
 +import { useCallback, useEffect, useRef, useState } from 'react';
 +import { useNavigate } from 'react-router-dom';
 +import { useChartDB } from '@/hooks/use-chartdb';
++import { useStorage } from '@/hooks/use-storage';
++import { useAlert } from '@/context/alert-context/alert-context';
 +import { useToast } from '@/components/toast/use-toast';
 +import { diagramToJSONOutput } from '@/lib/export-import-utils';
 +import type { Diagram } from '@/lib/domain/diagram';
 +import type { LiveSchemaIndexEntry } from '@/lib/live-schemas';
-+import { isValidLiveSchemaId } from '@/lib/live-schemas';
++import { fetchLiveSchemaIndex, isValidLiveSchemaId } from '@/lib/live-schemas';
 +
 +const LIVE_PREFIX = 'live-';
 +
@@ -435,17 +448,22 @@ index 0000000..508cca1
 +        .replace(/[^a-z0-9-_]+/g, '-')
 +        .replace(/^-+|-+$/g, '') || 'diagram';
 +
++const isLiveDiagram = (diagram: Diagram): boolean =>
++    diagram.id.startsWith(LIVE_PREFIX);
++
 +// Diagramas abertos via /live tem id "live-{schemaId}"; para os demais,
 +// deriva o schemaId do nome (usado ao publicar um diagrama novo).
 +const liveSchemaIdOf = (diagram: Diagram): string =>
-+    diagram.id.startsWith(LIVE_PREFIX)
++    isLiveDiagram(diagram)
 +        ? diagram.id.slice(LIVE_PREFIX.length)
 +        : slugify(diagram.name);
 +
 +// Grava o diagrama no volume (PUT do JSON) e faz upsert no index.json.
++// Recebe o JSON ja serializado para evitar serializar duas vezes.
 +const putDiagramToLive = async (
 +    schemaId: string,
-+    diagram: Diagram
++    diagramName: string,
++    diagramJson: string
 +): Promise<void> => {
 +    if (!isValidLiveSchemaId(schemaId)) {
 +        throw new Error(`Invalid schema id: "${schemaId}"`);
@@ -454,7 +472,7 @@ index 0000000..508cca1
 +    const putRes = await fetch(`/schema-data/${schemaId}.json`, {
 +        method: 'PUT',
 +        headers: { 'Content-Type': 'application/json' },
-+        body: diagramToJSONOutput(diagram),
++        body: diagramJson,
 +    });
 +    if (!putRes.ok) {
 +        throw new Error(`PUT ${schemaId}.json failed (${putRes.status})`);
@@ -477,7 +495,7 @@ index 0000000..508cca1
 +
 +    const entry: LiveSchemaIndexEntry = {
 +        id: schemaId,
-+        name: diagram.name,
++        name: diagramName,
 +        updatedAt: new Date().toISOString(),
 +    };
 +    const nextIndex = [...index.filter((e) => e.id !== schemaId), entry];
@@ -498,15 +516,29 @@ index 0000000..508cca1
 +    isPublishing: boolean;
 +} => {
 +    const { currentDiagram } = useChartDB();
++    const { deleteDiagram } = useStorage();
++    const { showAlert } = useAlert();
 +    const { toast } = useToast();
 +    const navigate = useNavigate();
 +    const [isPublishing, setIsPublishing] = useState<boolean>(false);
 +
-+    const publishLive = useCallback(async () => {
++    const doPublish = useCallback(async () => {
 +        setIsPublishing(true);
 +        try {
 +            const schemaId = liveSchemaIdOf(currentDiagram);
-+            await putDiagramToLive(schemaId, currentDiagram);
++            await putDiagramToLive(
++                schemaId,
++                currentDiagram.name,
++                diagramToJSONOutput(currentDiagram)
++            );
++
++            // O diagrama publicado passa a viver como "live-{schemaId}"
++            // (re-importado pelo /live); remove o original local para nao
++            // deixar duplicata na lista de diagramas.
++            if (!isLiveDiagram(currentDiagram)) {
++                await deleteDiagram(currentDiagram.id);
++            }
++
 +            toast({
 +                title: 'Published to Live',
 +                description: `Opening /live/${schemaId}`,
@@ -521,7 +553,33 @@ index 0000000..508cca1
 +        } finally {
 +            setIsPublishing(false);
 +        }
-+    }, [currentDiagram, toast, navigate]);
++    }, [currentDiagram, deleteDiagram, toast, navigate]);
++
++    const publishLive = useCallback(async () => {
++        // Publicar um diagrama novo cujo slug ja existe no index sobrescreve
++        // o live de outro diagrama — confirma antes.
++        if (!isLiveDiagram(currentDiagram)) {
++            const schemaId = liveSchemaIdOf(currentDiagram);
++            const existing = await fetchLiveSchemaIndex()
++                .then((entries) =>
++                    entries.find((entry) => entry.id === schemaId)
++                )
++                .catch(() => undefined);
++
++            if (existing) {
++                showAlert({
++                    title: 'Overwrite live schema?',
++                    description: `A live schema "${existing.name ?? schemaId}" (/live/${schemaId}) already exists and will be replaced by this diagram.`,
++                    actionLabel: 'Overwrite',
++                    closeLabel: 'Cancel',
++                    onAction: doPublish,
++                });
++                return;
++            }
++        }
++
++        await doPublish();
++    }, [currentDiagram, showAlert, doPublish]);
 +
 +    return { publishLive, isPublishing };
 +};
@@ -545,25 +603,27 @@ index 0000000..508cca1
 +            return;
 +        }
 +
-+        const json = diagramToJSONOutput(currentDiagram);
-+
 +        // Primeiro load deste diagrama live: estabelece baseline sem publicar
 +        // (evita reescrever o volume logo apos a importacao inicial).
 +        if (idRef.current !== id) {
 +            idRef.current = id;
-+            baselineRef.current = json;
++            baselineRef.current = diagramToJSONOutput(currentDiagram);
 +            return;
 +        }
 +
-+        if (json === baselineRef.current) {
-+            return;
-+        }
-+
++        // Serializa apenas quando o debounce dispara (1x por janela), nao a
++        // cada render — drag/digitacao dispara muitos updates por segundo.
 +        const handle = setTimeout(async () => {
++            const json = diagramToJSONOutput(currentDiagram);
++            if (json === baselineRef.current) {
++                return;
++            }
++
 +            try {
 +                await putDiagramToLive(
 +                    id.slice(LIVE_PREFIX.length),
-+                    currentDiagram
++                    currentDiagram.name,
++                    json
 +                );
 +                baselineRef.current = json;
 +            } catch (e) {
@@ -808,17 +868,19 @@ index 4848290..1cf2e01 100644
          resetUndoStack,
 diff --git a/src/pages/live-index-page/live-index-page.tsx b/src/pages/live-index-page/live-index-page.tsx
 new file mode 100644
-index 0000000..bec5d54
+index 0000000..3b5f1cb
 --- /dev/null
 +++ b/src/pages/live-index-page/live-index-page.tsx
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,78 @@
 +import { Spinner } from '@/components/spinner/spinner';
 +import React, { useEffect, useState } from 'react';
 +import { Link } from 'react-router-dom';
++import { LocalConfigProvider } from '@/context/local-config-context/local-config-provider';
++import { ThemeProvider } from '@/context/theme-context/theme-provider';
 +import type { LiveSchemaIndexEntry } from '@/lib/live-schemas';
 +import { fetchLiveSchemaIndex } from '@/lib/live-schemas';
 +
-+export const LiveIndexPage: React.FC = () => {
++const LiveIndexComponent: React.FC = () => {
 +    const [schemas, setSchemas] = useState<LiveSchemaIndexEntry[]>();
 +    const [error, setError] = useState<string>();
 +
@@ -880,6 +942,14 @@ index 0000000..bec5d54
 +        </section>
 +    );
 +};
++
++export const LiveIndexPage: React.FC = () => (
++    <LocalConfigProvider>
++        <ThemeProvider>
++            <LiveIndexComponent />
++        </ThemeProvider>
++    </LocalConfigProvider>
++);
 diff --git a/src/router.tsx b/src/router.tsx
 index 37c7bf1..35cb626 100644
 --- a/src/router.tsx
