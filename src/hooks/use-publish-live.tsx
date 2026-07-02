@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChartDB } from '@/hooks/use-chartdb';
+import { useStorage } from '@/hooks/use-storage';
+import { useAlert } from '@/context/alert-context/alert-context';
 import { useToast } from '@/components/toast/use-toast';
 import { diagramToJSONOutput } from '@/lib/export-import-utils';
 import type { Diagram } from '@/lib/domain/diagram';
 import type { LiveSchemaIndexEntry } from '@/lib/live-schemas';
-import { isValidLiveSchemaId } from '@/lib/live-schemas';
+import { fetchLiveSchemaIndex, isValidLiveSchemaId } from '@/lib/live-schemas';
 
 const LIVE_PREFIX = 'live-';
 
@@ -16,17 +18,22 @@ const slugify = (name: string): string =>
         .replace(/[^a-z0-9-_]+/g, '-')
         .replace(/^-+|-+$/g, '') || 'diagram';
 
+const isLiveDiagram = (diagram: Diagram): boolean =>
+    diagram.id.startsWith(LIVE_PREFIX);
+
 // Diagramas abertos via /live tem id "live-{schemaId}"; para os demais,
 // deriva o schemaId do nome (usado ao publicar um diagrama novo).
 const liveSchemaIdOf = (diagram: Diagram): string =>
-    diagram.id.startsWith(LIVE_PREFIX)
+    isLiveDiagram(diagram)
         ? diagram.id.slice(LIVE_PREFIX.length)
         : slugify(diagram.name);
 
 // Grava o diagrama no volume (PUT do JSON) e faz upsert no index.json.
+// Recebe o JSON ja serializado para evitar serializar duas vezes.
 const putDiagramToLive = async (
     schemaId: string,
-    diagram: Diagram
+    diagramName: string,
+    diagramJson: string
 ): Promise<void> => {
     if (!isValidLiveSchemaId(schemaId)) {
         throw new Error(`Invalid schema id: "${schemaId}"`);
@@ -35,7 +42,7 @@ const putDiagramToLive = async (
     const putRes = await fetch(`/schema-data/${schemaId}.json`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: diagramToJSONOutput(diagram),
+        body: diagramJson,
     });
     if (!putRes.ok) {
         throw new Error(`PUT ${schemaId}.json failed (${putRes.status})`);
@@ -58,7 +65,7 @@ const putDiagramToLive = async (
 
     const entry: LiveSchemaIndexEntry = {
         id: schemaId,
-        name: diagram.name,
+        name: diagramName,
         updatedAt: new Date().toISOString(),
     };
     const nextIndex = [...index.filter((e) => e.id !== schemaId), entry];
@@ -79,15 +86,29 @@ export const usePublishLive = (): {
     isPublishing: boolean;
 } => {
     const { currentDiagram } = useChartDB();
+    const { deleteDiagram } = useStorage();
+    const { showAlert } = useAlert();
     const { toast } = useToast();
     const navigate = useNavigate();
     const [isPublishing, setIsPublishing] = useState<boolean>(false);
 
-    const publishLive = useCallback(async () => {
+    const doPublish = useCallback(async () => {
         setIsPublishing(true);
         try {
             const schemaId = liveSchemaIdOf(currentDiagram);
-            await putDiagramToLive(schemaId, currentDiagram);
+            await putDiagramToLive(
+                schemaId,
+                currentDiagram.name,
+                diagramToJSONOutput(currentDiagram)
+            );
+
+            // O diagrama publicado passa a viver como "live-{schemaId}"
+            // (re-importado pelo /live); remove o original local para nao
+            // deixar duplicata na lista de diagramas.
+            if (!isLiveDiagram(currentDiagram)) {
+                await deleteDiagram(currentDiagram.id);
+            }
+
             toast({
                 title: 'Published to Live',
                 description: `Opening /live/${schemaId}`,
@@ -102,7 +123,33 @@ export const usePublishLive = (): {
         } finally {
             setIsPublishing(false);
         }
-    }, [currentDiagram, toast, navigate]);
+    }, [currentDiagram, deleteDiagram, toast, navigate]);
+
+    const publishLive = useCallback(async () => {
+        // Publicar um diagrama novo cujo slug ja existe no index sobrescreve
+        // o live de outro diagrama — confirma antes.
+        if (!isLiveDiagram(currentDiagram)) {
+            const schemaId = liveSchemaIdOf(currentDiagram);
+            const existing = await fetchLiveSchemaIndex()
+                .then((entries) =>
+                    entries.find((entry) => entry.id === schemaId)
+                )
+                .catch(() => undefined);
+
+            if (existing) {
+                showAlert({
+                    title: 'Overwrite live schema?',
+                    description: `A live schema "${existing.name ?? schemaId}" (/live/${schemaId}) already exists and will be replaced by this diagram.`,
+                    actionLabel: 'Overwrite',
+                    closeLabel: 'Cancel',
+                    onAction: doPublish,
+                });
+                return;
+            }
+        }
+
+        await doPublish();
+    }, [currentDiagram, showAlert, doPublish]);
 
     return { publishLive, isPublishing };
 };
@@ -126,25 +173,27 @@ export const useAutoPublishLive = (): void => {
             return;
         }
 
-        const json = diagramToJSONOutput(currentDiagram);
-
         // Primeiro load deste diagrama live: estabelece baseline sem publicar
         // (evita reescrever o volume logo apos a importacao inicial).
         if (idRef.current !== id) {
             idRef.current = id;
-            baselineRef.current = json;
+            baselineRef.current = diagramToJSONOutput(currentDiagram);
             return;
         }
 
-        if (json === baselineRef.current) {
-            return;
-        }
-
+        // Serializa apenas quando o debounce dispara (1x por janela), nao a
+        // cada render — drag/digitacao dispara muitos updates por segundo.
         const handle = setTimeout(async () => {
+            const json = diagramToJSONOutput(currentDiagram);
+            if (json === baselineRef.current) {
+                return;
+            }
+
             try {
                 await putDiagramToLive(
                     id.slice(LIVE_PREFIX.length),
-                    currentDiagram
+                    currentDiagram.name,
+                    json
                 );
                 baselineRef.current = json;
             } catch (e) {

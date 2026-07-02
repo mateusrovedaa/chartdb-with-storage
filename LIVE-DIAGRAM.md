@@ -50,7 +50,7 @@ atualizado"; não é edição colaborativa em tempo real.
 
 | Arquivo | Mudança |
 |---|---|
-| `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT`/`DELETE` para o Publish to Live |
+| `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT` para o Publish to Live |
 | `Dockerfile` | `NODE_OPTIONS=--max-old-space-size=4096` (vite estoura heap padrão) |
 | `src/router.tsx` | Rota `live` (lista) + `live/:schemaId` renderiza o `EditorPage` (sem redirect) |
 | `src/lib/live-schemas.ts` | **novo** — índice, validação de id, e `fetchLiveDiagram` (busca o JSON do volume) |
@@ -79,6 +79,10 @@ clicar, o app:
 3. Lê o `index.json`, faz upsert da entrada `{ id, name, updatedAt }` e regrava via `PUT`.
 4. Redireciona para `/live/{id}`, abrindo o diagrama já como live.
 
+Ao publicar um diagrama **novo** (não-live): se o slug já existir no índice, o app pede
+confirmação antes de sobrescrever; após publicar, o diagrama local original é removido
+(ele passa a viver como `live-{id}`, sem duplicata na lista de diagramas).
+
 Fluxo final: cria/edita o diagrama → **Publish to Live** → cai direto em `/live/{id}`. A
 escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
 
@@ -101,7 +105,7 @@ aba em menos de ~1,2s, aquele último lote pode não ter sido publicado ainda.
 
 **Pré-requisitos e segurança:**
 - O volume precisa estar montado como **leitura-escrita** (sem `:ro`), senão o `PUT` falha.
-- O endpoint `PUT`/`DELETE` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
+- O endpoint `PUT` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
   **proxy reverso à frente** da instância. Sem esse proxy, qualquer um na rede pode
   sobrescrever/apagar schemas.
 - Não é edição colaborativa em tempo real: cada navegador tem seu IndexedDB. O que se
@@ -139,7 +143,7 @@ Aponte o recurso do Coolify para **este fork** (em vez de `chartdb/chartdb`):
 - **Repositório**: `mateusrovedaa/chartdb-with-storage`, branch `main`
 - **Build Pack**: Dockerfile (o `Dockerfile` do fork)
 - **Build Args**: os mesmos `VITE_*` de antes
-- **Proxy com Basic Auth** à frente, protegendo `PUT`/`DELETE` em `/schema-data/`
+- **Proxy com Basic Auth** à frente, protegendo `PUT` em `/schema-data/`
 
 ### Volume no Coolify
 

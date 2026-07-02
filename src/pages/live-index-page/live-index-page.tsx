@@ -1,10 +1,12 @@
 import { Spinner } from '@/components/spinner/spinner';
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { LocalConfigProvider } from '@/context/local-config-context/local-config-provider';
+import { ThemeProvider } from '@/context/theme-context/theme-provider';
 import type { LiveSchemaIndexEntry } from '@/lib/live-schemas';
 import { fetchLiveSchemaIndex } from '@/lib/live-schemas';
 
-export const LiveIndexPage: React.FC = () => {
+const LiveIndexComponent: React.FC = () => {
     const [schemas, setSchemas] = useState<LiveSchemaIndexEntry[]>();
     const [error, setError] = useState<string>();
 
@@ -66,3 +68,11 @@ export const LiveIndexPage: React.FC = () => {
         </section>
     );
 };
+
+export const LiveIndexPage: React.FC = () => (
+    <LocalConfigProvider>
+        <ThemeProvider>
+            <LiveIndexComponent />
+        </ThemeProvider>
+    </LocalConfigProvider>
+);
