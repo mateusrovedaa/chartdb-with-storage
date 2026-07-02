@@ -1,27 +1,31 @@
-From b00931117da2a262ede42fa9cfb804cf71b7116b Mon Sep 17 00:00:00 2001
+From 0205ab3cbd8ad08bc8061876aaa4a48461862e65 Mon Sep 17 00:00:00 2001
 From: Mateus Roveda <mateusroveda04@gmail.com>
-Date: Thu, 2 Jul 2026 13:37:21 -0300
-Subject: [PATCH] feat: live diagram (/live, /live/:schemaId)
+Date: Thu, 2 Jul 2026 13:47:52 -0300
+Subject: [PATCH] feat: live diagram (/live, /live/:schemaId) + Publish to Live
 
-Serve JSONs de export de diagrama via Nginx a partir de um volume montado
-e auto-importa no IndexedDB do navegador ao abrir a pagina, com suporte a
-multiplos schemas. Sem conexao com o banco em runtime.
+Serve JSONs de export de diagrama via Nginx a partir de um volume montado,
+auto-importa no IndexedDB ao abrir a pagina, e permite publicar o diagrama
+atual de volta no volume via WebDAV PUT (botao Publish to Live). Suporte a
+multiplos schemas, sem conexao com o banco em runtime.
 
 Base: upstream chartdb/chartdb v1.20.1 (c24936a)
 ---
  Dockerfile                                    |   2 +
- LIVE-DIAGRAM.md                               | 151 ++++++++++++++++++
- default.conf.template                         |   5 +
- schema-data-sample/demo.json                  |  86 ++++++++++
+ LIVE-DIAGRAM.md                               | 179 ++++++++++++++++++
+ default.conf.template                         |  16 ++
+ schema-data-sample/demo.json                  |  86 +++++++++
  schema-data-sample/index.json                 |   3 +
- src/lib/live-schemas.ts                       |  28 ++++
- .../live-diagram-page/live-diagram-page.tsx   | 101 ++++++++++++
- src/pages/live-index-page/live-index-page.tsx |  68 ++++++++
- src/router.tsx                                |  20 +++
- 9 files changed, 464 insertions(+)
+ src/hooks/use-publish-live.tsx                |  93 +++++++++
+ src/lib/live-schemas.ts                       |  28 +++
+ .../editor-page/top-navbar/menu/menu.tsx      |   5 +
+ .../live-diagram-page/live-diagram-page.tsx   | 101 ++++++++++
+ src/pages/live-index-page/live-index-page.tsx |  68 +++++++
+ src/router.tsx                                |  20 ++
+ 11 files changed, 601 insertions(+)
  create mode 100644 LIVE-DIAGRAM.md
  create mode 100644 schema-data-sample/demo.json
  create mode 100644 schema-data-sample/index.json
+ create mode 100644 src/hooks/use-publish-live.tsx
  create mode 100644 src/lib/live-schemas.ts
  create mode 100644 src/pages/live-diagram-page/live-diagram-page.tsx
  create mode 100644 src/pages/live-index-page/live-index-page.tsx
@@ -41,10 +45,10 @@ index 1085241..8e3eb72 100644
  FROM nginx:stable-alpine AS production
 diff --git a/LIVE-DIAGRAM.md b/LIVE-DIAGRAM.md
 new file mode 100644
-index 0000000..309ea03
+index 0000000..f8e75dd
 --- /dev/null
 +++ b/LIVE-DIAGRAM.md
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,179 @@
 +# Live Diagram — fork do ChartDB self-hosted
 +
 +Este fork adiciona ao ChartDB self-hosted a funcionalidade **Live Diagram**: uma URL
@@ -96,16 +100,41 @@ index 0000000..309ea03
 +
 +| Arquivo | Mudança |
 +|---|---|
-+| `default.conf.template` | Bloco `location /schema-data/` servindo o volume montado |
++| `default.conf.template` | `location /schema-data/` servindo o volume + WebDAV `PUT`/`DELETE` para o Publish to Live |
 +| `Dockerfile` | `NODE_OPTIONS=--max-old-space-size=4096` (vite estoura heap padrão) |
 +| `src/router.tsx` | Rotas `live` e `live/:schemaId` (antes do catch-all `*`) |
 +| `src/lib/live-schemas.ts` | **novo** — fetch do índice, validação de id, id do diagrama |
 +| `src/pages/live-index-page/live-index-page.tsx` | **novo** — lista de schemas |
 +| `src/pages/live-diagram-page/live-diagram-page.tsx` | **novo** — import automático via `diagramFromJSONInput` |
++| `src/hooks/use-publish-live.tsx` | **novo** — publica o diagrama atual no volume via `PUT` |
++| `src/pages/editor-page/top-navbar/menu/menu.tsx` | item **Publish to Live** no menu Export as |
 +| `schema-data-sample/` | Exemplos de `demo.json` + `index.json` para teste |
 +
-+3 dos arquivos de código são **novos** (não conflitam em rebase), mas dependem de APIs
-+internas do ChartDB: `diagramFromJSONInput`, `useStorage`. Ver a seção de atualização.
++Os arquivos novos não conflitam textualmente em rebase, mas dependem de APIs internas do
++ChartDB: `diagramFromJSONInput`, `diagramToJSONOutput`, `useStorage`, `useChartDB`. Ver a
++seção de atualização.
++
++## Publicar direto do app (Publish to Live) — sem export manual
++
++Para não precisar exportar o JSON e jogar no volume à mão, o menu **Export as** ganhou o
++item **Publish to Live**. Ao clicar, o app:
++
++1. Serializa o diagrama atual (`diagramToJSONOutput`).
++2. Faz `PUT /schema-data/{id}.json` no volume (id = slug do nome do diagrama, validado
++   contra `^[a-z0-9-_]+$`).
++3. Lê o `index.json`, faz upsert da entrada `{ id, name, updatedAt }` e regrava via `PUT`.
++4. Mostra um toast com o link `/live/{id}`.
++
++Fluxo final: cria/edita o diagrama → **Publish to Live** → `/live/{id}` já reflete. A
++escrita usa o módulo WebDAV do Nginx (nenhum backend extra).
++
++**Pré-requisitos e segurança:**
++- O volume precisa estar montado como **leitura-escrita** (sem `:ro`), senão o `PUT` falha.
++- O endpoint `PUT`/`DELETE` fica **aberto** no Nginx — a proteção (Basic Auth) é feita no
++  **proxy reverso à frente** da instância. Sem esse proxy, qualquer um na rede pode
++  sobrescrever/apagar schemas.
++- Continua não sendo colaboração em tempo real: quem abre `/live` importa pro próprio
++  IndexedDB. O Publish centraliza a *fonte*, não a sessão de edição.
 +
 +## Como testar
 +
@@ -138,7 +167,10 @@ index 0000000..309ea03
 +- **Repositório**: `mateusrovedaa/chartdb-with-storage`, branch `main`
 +- **Build Pack**: Dockerfile (o `Dockerfile` do fork)
 +- **Build Args**: os mesmos `VITE_*` de antes
-+- **Volume (read-only)**: `/host/chartdb-schema:/usr/share/nginx/schema-data:ro`
++- **Volume (leitura-escrita, para o Publish to Live)**:
++  `/host/chartdb-schema:/usr/share/nginx/schema-data`
++  (use `:ro` apenas se for abrir mão do Publish to Live e só alimentar por job externo)
++- **Proxy com Basic Auth** à frente, protegendo `PUT`/`DELETE` em `/schema-data/`
 +
 +O `id` de cada schema precisa casar `^[a-z0-9-_]+$`. `index.json`:
 +
@@ -197,16 +229,27 @@ index 0000000..309ea03
 +AGPL pode exigir disponibilizar o código-fonte modificado para quem acessa o serviço —
 +confirmar com jurídico/compliance se aplicável.
 diff --git a/default.conf.template b/default.conf.template
-index 0bea3e7..7a5dcbd 100644
+index 0bea3e7..98bb7bc 100644
 --- a/default.conf.template
 +++ b/default.conf.template
-@@ -8,6 +8,11 @@ server {
+@@ -8,6 +8,22 @@ server {
  	    try_files  $uri $uri/ /index.html;
      }
  
 +    location /schema-data/ {
 +        alias /usr/share/nginx/schema-data/;
 +        add_header Cache-Control "no-cache";
++
++        # Escrita via WebDAV para o botao "Publish to Live" (PUT do JSON).
++        # A autenticacao fica no proxy reverso a frente desta instancia.
++        # Requer o volume montado como leitura-ESCRITA (sem :ro).
++        dav_methods PUT DELETE;
++        create_full_put_path on;
++        dav_access user:rw group:rw all:r;
++        client_max_body_size 20m;
++        # O temp precisa estar na MESMA filesystem do volume, senao o rename
++        # do PUT falha com EXDEV (cross-device) em bind mount.
++        client_body_temp_path /usr/share/nginx/schema-data/.tmp;
 +    }
 +
      location /config.js {
@@ -313,6 +356,105 @@ index 0000000..acc82a8
 +[
 +    { "id": "demo", "name": "Demo DB", "updatedAt": "2026-07-02T00:00:00.000Z" }
 +]
+diff --git a/src/hooks/use-publish-live.tsx b/src/hooks/use-publish-live.tsx
+new file mode 100644
+index 0000000..728e5dd
+--- /dev/null
++++ b/src/hooks/use-publish-live.tsx
+@@ -0,0 +1,93 @@
++import { useCallback, useState } from 'react';
++import { useChartDB } from '@/hooks/use-chartdb';
++import { useToast } from '@/components/toast/use-toast';
++import { diagramToJSONOutput } from '@/lib/export-import-utils';
++import type { LiveSchemaIndexEntry } from '@/lib/live-schemas';
++import { isValidLiveSchemaId } from '@/lib/live-schemas';
++
++const slugify = (name: string): string =>
++    name
++        .toLowerCase()
++        .trim()
++        .replace(/[^a-z0-9-_]+/g, '-')
++        .replace(/^-+|-+$/g, '') || 'diagram';
++
++export const usePublishLive = (): {
++    publishLive: () => Promise<void>;
++    isPublishing: boolean;
++} => {
++    const { currentDiagram } = useChartDB();
++    const { toast } = useToast();
++    const [isPublishing, setIsPublishing] = useState<boolean>(false);
++
++    const publishLive = useCallback(async () => {
++        setIsPublishing(true);
++        try {
++            const schemaId = slugify(currentDiagram.name);
++            if (!isValidLiveSchemaId(schemaId)) {
++                throw new Error(`Invalid schema id from name: "${schemaId}"`);
++            }
++
++            const putRes = await fetch(`/schema-data/${schemaId}.json`, {
++                method: 'PUT',
++                headers: { 'Content-Type': 'application/json' },
++                body: diagramToJSONOutput(currentDiagram),
++            });
++            if (!putRes.ok) {
++                throw new Error(
++                    `PUT ${schemaId}.json failed (${putRes.status})`
++                );
++            }
++
++            // Le o index atual (pode nao existir ainda), faz upsert e regrava.
++            let index: LiveSchemaIndexEntry[] = [];
++            try {
++                const idxRes = await fetch('/schema-data/index.json', {
++                    cache: 'no-store',
++                });
++                if (idxRes.ok) {
++                    const parsed = await idxRes.json();
++                    if (Array.isArray(parsed)) {
++                        index = parsed as LiveSchemaIndexEntry[];
++                    }
++                }
++            } catch {
++                // index.json ainda nao existe: comeca vazio
++            }
++
++            const entry: LiveSchemaIndexEntry = {
++                id: schemaId,
++                name: currentDiagram.name,
++                updatedAt: new Date().toISOString(),
++            };
++            const nextIndex = [
++                ...index.filter((e) => e.id !== schemaId),
++                entry,
++            ];
++
++            const idxPut = await fetch('/schema-data/index.json', {
++                method: 'PUT',
++                headers: { 'Content-Type': 'application/json' },
++                body: JSON.stringify(nextIndex, null, 2),
++            });
++            if (!idxPut.ok) {
++                throw new Error(`PUT index.json failed (${idxPut.status})`);
++            }
++
++            toast({
++                title: 'Published to Live',
++                description: `Available at /live/${schemaId}`,
++            });
++        } catch (e) {
++            toast({
++                title: 'Publish to Live failed',
++                description: e instanceof Error ? e.message : String(e),
++                variant: 'destructive',
++            });
++        } finally {
++            setIsPublishing(false);
++        }
++    }, [currentDiagram, toast]);
++
++    return { publishLive, isPublishing };
++};
 diff --git a/src/lib/live-schemas.ts b/src/lib/live-schemas.ts
 new file mode 100644
 index 0000000..1a04ded
@@ -347,6 +489,36 @@ index 0000000..1a04ded
 +
 +    return entries.filter((entry) => isValidLiveSchemaId(entry.id));
 +};
+diff --git a/src/pages/editor-page/top-navbar/menu/menu.tsx b/src/pages/editor-page/top-navbar/menu/menu.tsx
+index 28c27d6..33871df 100644
+--- a/src/pages/editor-page/top-navbar/menu/menu.tsx
++++ b/src/pages/editor-page/top-navbar/menu/menu.tsx
+@@ -13,6 +13,7 @@ import {
+     MenubarTrigger,
+ } from '@/components/menubar/menubar';
+ import { useChartDB } from '@/hooks/use-chartdb';
++import { usePublishLive } from '@/hooks/use-publish-live';
+ import { useDialog } from '@/hooks/use-dialog';
+ import { useExportImage } from '@/hooks/use-export-image';
+ import { databaseTypeToLabelMap } from '@/lib/databases';
+@@ -63,6 +64,7 @@ export const Menu: React.FC<MenuProps> = () => {
+         setShowDBViews,
+     } = useLocalConfig();
+     const { t } = useTranslation();
++    const { publishLive, isPublishing } = usePublishLive();
+     const { redo, undo, hasRedo, hasUndo } = useHistory();
+     const { exportImage } = useExportImage();
+     const navigate = useNavigate();
+@@ -307,6 +309,9 @@ export const Menu: React.FC<MenuProps> = () => {
+                             </MenubarItem>
+                         </MenubarSubContent>
+                     </MenubarSub>
++                    <MenubarItem disabled={isPublishing} onClick={publishLive}>
++                        Publish to Live
++                    </MenubarItem>
+                     <MenubarSeparator />
+                     <MenubarItem
+                         onClick={() =>
 diff --git a/src/pages/live-diagram-page/live-diagram-page.tsx b/src/pages/live-diagram-page/live-diagram-page.tsx
 new file mode 100644
 index 0000000..c1db666
